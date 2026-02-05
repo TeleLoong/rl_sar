@@ -50,6 +50,13 @@ public:
     ~RL_Real();
 
 private:
+    enum class JointTestWaveMode
+    {
+        Hold = 0,
+        Square = 1,
+        Sine = 2,
+    };
+
     // rl functions
     torch::Tensor Forward() override;
     void GetState(RobotState<double> *state) override;
@@ -87,11 +94,16 @@ private:
     bool joint_test_mode_ = false;
     bool joint_test_inited_ = false;
     int joint_test_hw_idx_ = 0;     // 0..11 (SDK order)
-    bool joint_test_square_ = true; // square wave is easier to see than sine
+    JointTestWaveMode joint_test_wave_mode_ = JointTestWaveMode::Hold;
+    bool joint_test_hold_positive_ = true;
+    bool joint_test_hold_others_ = false; // non-selected joints stay in passive gains by default
+    bool joint_test_use_cmd_base_ = false; // default: use measured state as baseline to avoid global jumps
     double joint_test_amp_rad_ = 0.0;
     double joint_test_freq_hz_ = 0.25;
-    double joint_test_kp_ = 60.0;
-    double joint_test_kd_ = 1.0;
+    double joint_test_kp_ = 10.0;
+    double joint_test_kd_ = 0.30;
+    double joint_test_kp_other_ = 10.0;
+    double joint_test_kd_other_ = 0.30;
     std::array<double, 12> joint_test_q0_{};
     std::chrono::steady_clock::time_point joint_test_t0_{};
     void RunJointOrderTest();

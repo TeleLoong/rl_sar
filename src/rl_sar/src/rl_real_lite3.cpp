@@ -203,11 +203,15 @@ void RL_Real::RobotControl()
         this->joint_test_mode_ = !this->joint_test_mode_;
         this->joint_test_inited_ = false;
         this->joint_test_amp_rad_ = 0.0;
-        this->joint_test_square_ = true;
-
-        // Default gains from yaml if available
-        if (this->params.fixed_kp.defined() && this->params.fixed_kp.numel() > 0) this->joint_test_kp_ = this->params.fixed_kp[0][0].item<double>();
-        if (this->params.fixed_kd.defined() && this->params.fixed_kd.numel() > 0) this->joint_test_kd_ = this->params.fixed_kd[0][0].item<double>();
+        this->joint_test_freq_hz_ = 0.25;
+        this->joint_test_wave_mode_ = JointTestWaveMode::Hold;
+        this->joint_test_hold_positive_ = true;
+        this->joint_test_hold_others_ = false;
+        this->joint_test_use_cmd_base_ = false;
+        this->joint_test_kp_ = 10.0;
+        this->joint_test_kd_ = 0.30;
+        this->joint_test_kp_other_ = 10.0;
+        this->joint_test_kd_other_ = 0.30;
 
         std::cout << std::endl
                   << LOGGER::WARNING
@@ -215,10 +219,23 @@ void RL_Real::RobotControl()
         if (this->joint_test_mode_)
         {
             std::cout << LOGGER::NOTE
-                      << "Put robot on a stand (feet off ground). Keys: J/L select hw joint(0..11), 0-9 direct, O=10 P=11, I/K amp, H square/sine, Space zero amp, T exit."
+                      << "Put robot on a stand (feet off ground). Keys: J/L select hw(0..11), 0-9 direct, O=10 P=11, I/K amp, H wave(hold/square/sine), X +/- (hold), G baseline(cmd/state), V hold-other joints, U/M kp +/- , Y/N kd +/- , Space amp=0, T exit."
                       << std::endl;
+
+            // Quick mapping hint (DOF order -> hardware index).
+            if (!this->params.joint_mapping.empty())
+            {
+                std::cout << LOGGER::INFO << "[JOINT_TEST] dof->hw mapping:" << std::endl;
+                const int n = std::min<int>(this->params.num_of_dofs, static_cast<int>(this->params.joint_mapping.size()));
+                for (int i = 0; i < n; ++i)
+                {
+                    const std::string name = (i < static_cast<int>(this->params.joint_names.size())) ? this->params.joint_names[i] : ("dof_" + std::to_string(i));
+                    std::cout << LOGGER::INFO << "  dof=" << i << " name=" << name << " -> hw=" << this->params.joint_mapping[i] << std::endl;
+                }
+            }
         }
         this->control.current_keyboard = Input::Keyboard::None;
+        this->control.current_gamepad = Input::Gamepad::None;
     }
 
     if (this->joint_test_mode_)
@@ -275,8 +292,68 @@ void RL_Real::RobotControl()
         }
         if (this->control.current_keyboard == Input::Keyboard::H)
         {
-            this->joint_test_square_ = !this->joint_test_square_;
+            if (this->joint_test_wave_mode_ == JointTestWaveMode::Hold) this->joint_test_wave_mode_ = JointTestWaveMode::Square;
+            else if (this->joint_test_wave_mode_ == JointTestWaveMode::Square) this->joint_test_wave_mode_ = JointTestWaveMode::Sine;
+            else this->joint_test_wave_mode_ = JointTestWaveMode::Hold;
             this->joint_test_inited_ = false;
+            this->control.current_keyboard = Input::Keyboard::None;
+        }
+        if (this->control.current_keyboard == Input::Keyboard::X)
+        {
+            this->joint_test_hold_positive_ = !this->joint_test_hold_positive_;
+            this->joint_test_inited_ = false;
+            this->control.current_keyboard = Input::Keyboard::None;
+        }
+        if (this->control.current_keyboard == Input::Keyboard::G)
+        {
+            this->joint_test_use_cmd_base_ = !this->joint_test_use_cmd_base_;
+            this->joint_test_inited_ = false;
+            std::cout << LOGGER::INFO
+                      << "[JOINT_TEST] baseline=" << (this->joint_test_use_cmd_base_ ? "cmd" : "state")
+                      << std::endl;
+            this->control.current_keyboard = Input::Keyboard::None;
+        }
+        if (this->control.current_keyboard == Input::Keyboard::V)
+        {
+            this->joint_test_hold_others_ = !this->joint_test_hold_others_;
+            this->joint_test_inited_ = false;
+            std::cout << LOGGER::INFO
+                      << "[JOINT_TEST] hold_other_joints=" << (this->joint_test_hold_others_ ? "ON" : "OFF")
+                      << std::endl;
+            this->control.current_keyboard = Input::Keyboard::None;
+        }
+        if (this->control.current_keyboard == Input::Keyboard::U)
+        {
+            this->joint_test_kp_ = std::min(120.0, this->joint_test_kp_ + 2.0);
+            this->joint_test_inited_ = false;
+            std::cout << LOGGER::INFO << "[JOINT_TEST] kp=" << this->joint_test_kp_ << std::endl;
+            this->control.current_keyboard = Input::Keyboard::None;
+        }
+        if (this->control.current_keyboard == Input::Keyboard::M)
+        {
+            this->joint_test_kp_ = std::max(0.0, this->joint_test_kp_ - 2.0);
+            this->joint_test_inited_ = false;
+            std::cout << LOGGER::INFO << "[JOINT_TEST] kp=" << this->joint_test_kp_ << std::endl;
+            this->control.current_keyboard = Input::Keyboard::None;
+        }
+        if (this->control.current_keyboard == Input::Keyboard::Y)
+        {
+            this->joint_test_kd_ = std::min(5.0, this->joint_test_kd_ + 0.05);
+            this->joint_test_inited_ = false;
+            std::cout << LOGGER::INFO << "[JOINT_TEST] kd=" << this->joint_test_kd_ << std::endl;
+            this->control.current_keyboard = Input::Keyboard::None;
+        }
+        if (this->control.current_keyboard == Input::Keyboard::N)
+        {
+            this->joint_test_kd_ = std::max(0.0, this->joint_test_kd_ - 0.05);
+            this->joint_test_inited_ = false;
+            std::cout << LOGGER::INFO << "[JOINT_TEST] kd=" << this->joint_test_kd_ << std::endl;
+            this->control.current_keyboard = Input::Keyboard::None;
+        }
+        if (this->control.current_keyboard == Input::Keyboard::R)
+        {
+            this->joint_test_inited_ = false;
+            std::cout << LOGGER::INFO << "[JOINT_TEST] relatch baseline" << std::endl;
             this->control.current_keyboard = Input::Keyboard::None;
         }
         if (this->control.current_keyboard == Input::Keyboard::Space)
@@ -377,20 +454,46 @@ void RL_Real::RunJointOrderTest()
     {
         for (int i = 0; i < 12; ++i)
         {
-            this->joint_test_q0_[i] = static_cast<double>(this->robot_data_->joint_data.joint_data[i].position);
+            if (this->joint_test_use_cmd_base_)
+            {
+                // Use last sent command (hardware order) to avoid sudden jumps when entering test mode.
+                this->joint_test_q0_[i] = static_cast<double>(this->robot_joint_cmd_.joint_cmd[i].position);
+            }
+            else
+            {
+                // Use measured state (hardware order).
+                this->joint_test_q0_[i] = static_cast<double>(this->robot_data_->joint_data.joint_data[i].position);
+            }
         }
         this->joint_test_t0_ = std::chrono::steady_clock::now();
         this->joint_test_inited_ = true;
+
+        const double base_cmd = static_cast<double>(this->robot_joint_cmd_.joint_cmd[idx].position);
+        const double base_state = static_cast<double>(this->robot_data_->joint_data.joint_data[idx].position);
+        const double base_diff = base_state - base_cmd;
+        const auto WaveName = [this]() -> const char*
+        {
+            switch (this->joint_test_wave_mode_)
+            {
+            case JointTestWaveMode::Hold: return "hold";
+            case JointTestWaveMode::Square: return "square";
+            case JointTestWaveMode::Sine: return "sine";
+            }
+            return "na";
+        };
 
         std::cout << LOGGER::INFO
                   << "[JOINT_TEST] hw_idx=" << idx
                   << " (" << LegNameFromIdx(idx) << "_" << JointNameFromIdx(idx) << ")"
                   << " base=" << this->joint_test_q0_[idx]
+                  << " (cmd=" << base_cmd << " state=" << base_state << " diff=" << base_diff << ")"
                   << " amp(rad)=" << this->joint_test_amp_rad_
                   << " freq(Hz)=" << this->joint_test_freq_hz_
                   << " kp=" << this->joint_test_kp_
                   << " kd=" << this->joint_test_kd_
-                  << " wave=" << (this->joint_test_square_ ? "square" : "sine")
+                  << " wave=" << WaveName()
+                  << " hold_other=" << (this->joint_test_hold_others_ ? "on" : "off")
+                  << " baseline=" << (this->joint_test_use_cmd_base_ ? "cmd" : "state")
                   << std::endl;
     }
 
@@ -398,7 +501,11 @@ void RL_Real::RunJointOrderTest()
     const double t = std::chrono::duration<double>(now - this->joint_test_t0_).count();
     double delta = 0.0;
     const double s = std::sin(2.0 * M_PI * this->joint_test_freq_hz_ * t);
-    if (this->joint_test_square_)
+    if (this->joint_test_wave_mode_ == JointTestWaveMode::Hold)
+    {
+        delta = this->joint_test_amp_rad_ * (this->joint_test_hold_positive_ ? 1.0 : -1.0);
+    }
+    else if (this->joint_test_wave_mode_ == JointTestWaveMode::Square)
     {
         delta = this->joint_test_amp_rad_ * (s >= 0.0 ? 1.0 : -1.0);
     }
@@ -415,9 +522,24 @@ void RL_Real::RunJointOrderTest()
         cmd.joint_cmd[i].position = static_cast<float>(target);
         cmd.joint_cmd[i].velocity = 0.0f;
         cmd.joint_cmd[i].torque = 0.0f;
-        cmd.joint_cmd[i].kp = static_cast<float>(this->joint_test_kp_);
-        cmd.joint_cmd[i].kd = static_cast<float>(this->joint_test_kd_);
+        if (i == idx)
+        {
+            cmd.joint_cmd[i].kp = static_cast<float>(this->joint_test_kp_);
+            cmd.joint_cmd[i].kd = static_cast<float>(this->joint_test_kd_);
+        }
+        else if (this->joint_test_hold_others_)
+        {
+            cmd.joint_cmd[i].kp = static_cast<float>(this->joint_test_kp_other_);
+            cmd.joint_cmd[i].kd = static_cast<float>(this->joint_test_kd_other_);
+        }
+        else
+        {
+            // Keep non-selected joints in a passive-like mode to avoid global jumps.
+            cmd.joint_cmd[i].kp = 0.0f;
+            cmd.joint_cmd[i].kd = 2.5f;
+        }
     }
+    this->robot_joint_cmd_ = cmd;
     this->sender_->SendCmd(cmd);
 }
 
