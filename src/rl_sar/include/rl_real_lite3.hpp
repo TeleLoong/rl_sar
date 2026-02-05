@@ -20,6 +20,9 @@
 #include "receiver.h"
 #include "robot_types.h"
 #include <cmath>
+#include <array>
+#include <chrono>
+#include <cstring>
 
 //Retroid Gamepad
 #include "gamepad.h"
@@ -79,6 +82,19 @@ private:
     std::shared_ptr<RetroidGamepad> gamepad_ptr_;
     RetroidKeys rt_keys_record_, rt_keys_;
     bool first_flag_;
+
+    // joint order test (raw hardware index)
+    bool joint_test_mode_ = false;
+    bool joint_test_inited_ = false;
+    int joint_test_hw_idx_ = 0;     // 0..11 (SDK order)
+    bool joint_test_square_ = true; // square wave is easier to see than sine
+    double joint_test_amp_rad_ = 0.0;
+    double joint_test_freq_hz_ = 0.25;
+    double joint_test_kp_ = 60.0;
+    double joint_test_kd_ = 1.0;
+    std::array<double, 12> joint_test_q0_{};
+    std::chrono::steady_clock::time_point joint_test_t0_{};
+    void RunJointOrderTest();
 
     // others
     int motiontime = 0;

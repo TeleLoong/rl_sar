@@ -5,6 +5,22 @@
 
 #include "rl_real_lite3.hpp"
 
+static const char* LegNameFromIdx(int hw_idx)
+{
+    static const char* kLegs[] = {"FL", "FR", "HL", "HR"};
+    const int leg = hw_idx / 3;
+    if (leg < 0 || leg > 3) return "NA";
+    return kLegs[leg];
+}
+
+static const char* JointNameFromIdx(int hw_idx)
+{
+    static const char* kJoints[] = {"HipX", "HipY", "Knee"};
+    const int j = hw_idx % 3;
+    if (j < 0 || j > 2) return "NA";
+    return kJoints[j];
+}
+
 RL_Real::RL_Real()
 #if defined(USE_ROS2) && defined(USE_ROS)
     : rclcpp::Node("rl_real_node")
@@ -182,6 +198,124 @@ void RL_Real::RobotControl()
 {
     this->motiontime++;
 
+    if (this->control.current_keyboard == Input::Keyboard::T)
+    {
+        this->joint_test_mode_ = !this->joint_test_mode_;
+        this->joint_test_inited_ = false;
+        this->joint_test_amp_rad_ = 0.0;
+        this->joint_test_square_ = true;
+
+        // Default gains from yaml if available
+        if (this->params.fixed_kp.defined() && this->params.fixed_kp.numel() > 0) this->joint_test_kp_ = this->params.fixed_kp[0][0].item<double>();
+        if (this->params.fixed_kd.defined() && this->params.fixed_kd.numel() > 0) this->joint_test_kd_ = this->params.fixed_kd[0][0].item<double>();
+
+        std::cout << std::endl
+                  << LOGGER::WARNING
+                  << "JOINT TEST mode: " << (this->joint_test_mode_ ? "ON" : "OFF") << std::endl;
+        if (this->joint_test_mode_)
+        {
+            std::cout << LOGGER::NOTE
+                      << "Put robot on a stand (feet off ground). Keys: J/L select hw joint(0..11), 0-9 direct, O=10 P=11, I/K amp, H square/sine, Space zero amp, T exit."
+                      << std::endl;
+        }
+        this->control.current_keyboard = Input::Keyboard::None;
+    }
+
+    if (this->joint_test_mode_)
+    {
+        // Update state (from SDK), then send a visible position perturbation to one hardware joint index.
+        this->GetState(&this->robot_state);
+
+        // Direct index select:
+        // 0..9 -> hw_idx 0..9, O -> 10, P -> 11.
+        if (this->control.current_keyboard >= Input::Keyboard::Num0 &&
+            this->control.current_keyboard <= Input::Keyboard::Num9)
+        {
+            const int idx = static_cast<int>(this->control.current_keyboard) - static_cast<int>(Input::Keyboard::Num0);
+            this->joint_test_hw_idx_ = std::max(0, std::min(11, idx));
+            this->joint_test_inited_ = false;
+            this->control.current_keyboard = Input::Keyboard::None;
+        }
+        if (this->control.current_keyboard == Input::Keyboard::O)
+        {
+            this->joint_test_hw_idx_ = 10;
+            this->joint_test_inited_ = false;
+            this->control.current_keyboard = Input::Keyboard::None;
+        }
+        if (this->control.current_keyboard == Input::Keyboard::P)
+        {
+            this->joint_test_hw_idx_ = 11;
+            this->joint_test_inited_ = false;
+            this->control.current_keyboard = Input::Keyboard::None;
+        }
+
+        if (this->control.current_keyboard == Input::Keyboard::J)
+        {
+            this->joint_test_hw_idx_ = (this->joint_test_hw_idx_ + 11) % 12;
+            this->joint_test_inited_ = false;
+            this->control.current_keyboard = Input::Keyboard::None;
+        }
+        if (this->control.current_keyboard == Input::Keyboard::L)
+        {
+            this->joint_test_hw_idx_ = (this->joint_test_hw_idx_ + 1) % 12;
+            this->joint_test_inited_ = false;
+            this->control.current_keyboard = Input::Keyboard::None;
+        }
+        if (this->control.current_keyboard == Input::Keyboard::I)
+        {
+            this->joint_test_amp_rad_ = std::min(1.2, this->joint_test_amp_rad_ + 0.05);
+            this->joint_test_inited_ = false;
+            this->control.current_keyboard = Input::Keyboard::None;
+        }
+        if (this->control.current_keyboard == Input::Keyboard::K)
+        {
+            this->joint_test_amp_rad_ = std::max(0.0, this->joint_test_amp_rad_ - 0.05);
+            this->joint_test_inited_ = false;
+            this->control.current_keyboard = Input::Keyboard::None;
+        }
+        if (this->control.current_keyboard == Input::Keyboard::H)
+        {
+            this->joint_test_square_ = !this->joint_test_square_;
+            this->joint_test_inited_ = false;
+            this->control.current_keyboard = Input::Keyboard::None;
+        }
+        if (this->control.current_keyboard == Input::Keyboard::Space)
+        {
+            this->joint_test_amp_rad_ = 0.0;
+            this->joint_test_inited_ = false;
+            this->control.current_keyboard = Input::Keyboard::None;
+        }
+
+        // Optional: use DPad for convenience (Retroid).
+        if (this->control.current_gamepad == Input::Gamepad::DPadLeft)
+        {
+            this->joint_test_hw_idx_ = (this->joint_test_hw_idx_ + 11) % 12;
+            this->joint_test_inited_ = false;
+            this->control.current_gamepad = Input::Gamepad::None;
+        }
+        if (this->control.current_gamepad == Input::Gamepad::DPadRight)
+        {
+            this->joint_test_hw_idx_ = (this->joint_test_hw_idx_ + 1) % 12;
+            this->joint_test_inited_ = false;
+            this->control.current_gamepad = Input::Gamepad::None;
+        }
+        if (this->control.current_gamepad == Input::Gamepad::DPadUp)
+        {
+            this->joint_test_amp_rad_ = std::min(1.2, this->joint_test_amp_rad_ + 0.05);
+            this->joint_test_inited_ = false;
+            this->control.current_gamepad = Input::Gamepad::None;
+        }
+        if (this->control.current_gamepad == Input::Gamepad::DPadDown)
+        {
+            this->joint_test_amp_rad_ = std::max(0.0, this->joint_test_amp_rad_ - 0.05);
+            this->joint_test_inited_ = false;
+            this->control.current_gamepad = Input::Gamepad::None;
+        }
+
+        this->RunJointOrderTest();
+        return;
+    }
+
     if (this->control.current_keyboard == Input::Keyboard::W)
     {
         this->control.x += 0.1;
@@ -229,6 +363,62 @@ void RL_Real::RobotControl()
     this->GetState(&this->robot_state);
     this->StateController(&this->robot_state, &this->robot_command);
     this->SetCommand(&this->robot_command);
+}
+
+void RL_Real::RunJointOrderTest()
+{
+    if (!this->sender_ || !this->robot_data_)
+    {
+        return;
+    }
+
+    const int idx = std::max(0, std::min(11, this->joint_test_hw_idx_));
+    if (!this->joint_test_inited_)
+    {
+        for (int i = 0; i < 12; ++i)
+        {
+            this->joint_test_q0_[i] = static_cast<double>(this->robot_data_->joint_data.joint_data[i].position);
+        }
+        this->joint_test_t0_ = std::chrono::steady_clock::now();
+        this->joint_test_inited_ = true;
+
+        std::cout << LOGGER::INFO
+                  << "[JOINT_TEST] hw_idx=" << idx
+                  << " (" << LegNameFromIdx(idx) << "_" << JointNameFromIdx(idx) << ")"
+                  << " base=" << this->joint_test_q0_[idx]
+                  << " amp(rad)=" << this->joint_test_amp_rad_
+                  << " freq(Hz)=" << this->joint_test_freq_hz_
+                  << " kp=" << this->joint_test_kp_
+                  << " kd=" << this->joint_test_kd_
+                  << " wave=" << (this->joint_test_square_ ? "square" : "sine")
+                  << std::endl;
+    }
+
+    const auto now = std::chrono::steady_clock::now();
+    const double t = std::chrono::duration<double>(now - this->joint_test_t0_).count();
+    double delta = 0.0;
+    const double s = std::sin(2.0 * M_PI * this->joint_test_freq_hz_ * t);
+    if (this->joint_test_square_)
+    {
+        delta = this->joint_test_amp_rad_ * (s >= 0.0 ? 1.0 : -1.0);
+    }
+    else
+    {
+        delta = this->joint_test_amp_rad_ * s;
+    }
+
+    RobotCmd cmd;
+    std::memset(&cmd, 0, sizeof(cmd));
+    for (int i = 0; i < 12; ++i)
+    {
+        const double target = this->joint_test_q0_[i] + ((i == idx) ? delta : 0.0);
+        cmd.joint_cmd[i].position = static_cast<float>(target);
+        cmd.joint_cmd[i].velocity = 0.0f;
+        cmd.joint_cmd[i].torque = 0.0f;
+        cmd.joint_cmd[i].kp = static_cast<float>(this->joint_test_kp_);
+        cmd.joint_cmd[i].kd = static_cast<float>(this->joint_test_kd_);
+    }
+    this->sender_->SendCmd(cmd);
 }
 
 void RL_Real::RunModel()
