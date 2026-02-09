@@ -204,13 +204,15 @@ void RL_Real::RobotControl()
         this->joint_test_mode_ = false;
         this->joint_monitor_last_print_t_ = std::chrono::steady_clock::time_point{};
         this->joint_monitor_frame_ = 0;
+        this->joint_monitor_last_tick_ = 0;
+        this->joint_monitor_stale_count_ = 0;
 
         std::cout << std::endl << LOGGER::WARNING
                   << "JOINT MONITOR mode: " << (this->joint_monitor_mode_ ? "ON" : "OFF") << std::endl;
         if (this->joint_monitor_mode_)
         {
             std::cout << LOGGER::NOTE
-                      << "Read-only monitor enabled. Robot is set to passive-like damping and will keep printing 12 joint positions. Manually push joints and observe values. Press T again to exit."
+                      << "Read-only monitor enabled. NO control command will be sent in this mode. Manually push joints and observe values. Press T again to exit."
                       << std::endl;
 
             if (!this->params.joint_mapping.empty())
@@ -440,25 +442,23 @@ void RL_Real::RobotControl()
 
 void RL_Real::RunJointPositionMonitor()
 {
-    if (!this->sender_ || !this->robot_data_)
+    if (!this->robot_data_)
     {
         return;
     }
 
     this->GetState(&this->robot_state);
 
-    RobotCmd cmd;
-    std::memset(&cmd, 0, sizeof(cmd));
-    for (int i = 0; i < 12; ++i)
+    const uint32_t tick = this->robot_data_->tick;
+    if (tick == this->joint_monitor_last_tick_)
     {
-        cmd.joint_cmd[i].position = this->robot_data_->joint_data.joint_data[i].position;
-        cmd.joint_cmd[i].velocity = 0.0f;
-        cmd.joint_cmd[i].torque = 0.0f;
-        cmd.joint_cmd[i].kp = 0.0f;
-        cmd.joint_cmd[i].kd = 2.5f;
+        ++this->joint_monitor_stale_count_;
     }
-    this->robot_joint_cmd_ = cmd;
-    this->sender_->SendCmd(cmd);
+    else
+    {
+        this->joint_monitor_last_tick_ = tick;
+        this->joint_monitor_stale_count_ = 0;
+    }
 
     const auto now = std::chrono::steady_clock::now();
     if (this->joint_monitor_last_print_t_.time_since_epoch().count() == 0 ||
@@ -469,7 +469,16 @@ void RL_Real::RunJointPositionMonitor()
 
         std::cout << std::endl << LOGGER::INFO
                   << "[JOINT_MONITOR] frame=" << this->joint_monitor_frame_
-                  << " tick=" << this->robot_data_->tick << std::endl;
+                  << " tick=" << tick
+                  << " stale_count=" << this->joint_monitor_stale_count_ << std::endl;
+
+        if (this->joint_monitor_stale_count_ > 5)
+        {
+            std::cout << LOGGER::WARNING
+                      << "[JOINT_MONITOR] robot_data tick is not updating. Incoming state stream is likely invalid (network.toml ip/target_port or LAN route mismatch)."
+                      << std::endl;
+        }
+
         for (int i = 0; i < 12; ++i)
         {
             const float q = this->robot_data_->joint_data.joint_data[i].position;

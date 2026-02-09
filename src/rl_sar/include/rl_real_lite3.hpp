@@ -114,6 +114,8 @@ private:
     bool joint_monitor_mode_ = false;
     std::chrono::steady_clock::time_point joint_monitor_last_print_t_{};
     uint32_t joint_monitor_frame_ = 0;
+    uint32_t joint_monitor_last_tick_ = 0;
+    int joint_monitor_stale_count_ = 0;
 
     // others
     int motiontime = 0;
