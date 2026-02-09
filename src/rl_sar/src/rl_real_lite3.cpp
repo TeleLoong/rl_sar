@@ -200,32 +200,22 @@ void RL_Real::RobotControl()
 
     if (this->control.current_keyboard == Input::Keyboard::T)
     {
-        this->joint_test_mode_ = !this->joint_test_mode_;
-        this->joint_test_inited_ = false;
-        this->joint_test_amp_rad_ = 0.0;
-        this->joint_test_freq_hz_ = 0.25;
-        this->joint_test_wave_mode_ = JointTestWaveMode::Hold;
-        this->joint_test_hold_positive_ = true;
-        this->joint_test_hold_others_ = false;
-        this->joint_test_use_cmd_base_ = false;
-        this->joint_test_kp_ = 10.0;
-        this->joint_test_kd_ = 0.30;
-        this->joint_test_kp_other_ = 10.0;
-        this->joint_test_kd_other_ = 0.30;
+        this->joint_monitor_mode_ = !this->joint_monitor_mode_;
+        this->joint_test_mode_ = false;
+        this->joint_monitor_last_print_t_ = std::chrono::steady_clock::time_point{};
+        this->joint_monitor_frame_ = 0;
 
-        std::cout << std::endl
-                  << LOGGER::WARNING
-                  << "JOINT TEST mode: " << (this->joint_test_mode_ ? "ON" : "OFF") << std::endl;
-        if (this->joint_test_mode_)
+        std::cout << std::endl << LOGGER::WARNING
+                  << "JOINT MONITOR mode: " << (this->joint_monitor_mode_ ? "ON" : "OFF") << std::endl;
+        if (this->joint_monitor_mode_)
         {
             std::cout << LOGGER::NOTE
-                      << "Put robot on a stand (feet off ground). Keys: J/L select hw(0..11), 0-9 direct, O=10 P=11, I/K amp, H wave(hold/square/sine), X +/- (hold), G baseline(cmd/state), V hold-other joints, U/M kp +/- , Y/N kd +/- , Space amp=0, T exit."
+                      << "Read-only monitor enabled. Robot is set to passive-like damping and will keep printing 12 joint positions. Manually push joints and observe values. Press T again to exit."
                       << std::endl;
 
-            // Quick mapping hint (DOF order -> hardware index).
             if (!this->params.joint_mapping.empty())
             {
-                std::cout << LOGGER::INFO << "[JOINT_TEST] dof->hw mapping:" << std::endl;
+                std::cout << LOGGER::INFO << "[JOINT_MONITOR] dof->hw mapping:" << std::endl;
                 const int n = std::min<int>(this->params.num_of_dofs, static_cast<int>(this->params.joint_mapping.size()));
                 for (int i = 0; i < n; ++i)
                 {
@@ -236,6 +226,12 @@ void RL_Real::RobotControl()
         }
         this->control.current_keyboard = Input::Keyboard::None;
         this->control.current_gamepad = Input::Gamepad::None;
+    }
+
+    if (this->joint_monitor_mode_)
+    {
+        this->RunJointPositionMonitor();
+        return;
     }
 
     if (this->joint_test_mode_)
@@ -440,6 +436,54 @@ void RL_Real::RobotControl()
     this->GetState(&this->robot_state);
     this->StateController(&this->robot_state, &this->robot_command);
     this->SetCommand(&this->robot_command);
+}
+
+void RL_Real::RunJointPositionMonitor()
+{
+    if (!this->sender_ || !this->robot_data_)
+    {
+        return;
+    }
+
+    this->GetState(&this->robot_state);
+
+    RobotCmd cmd;
+    std::memset(&cmd, 0, sizeof(cmd));
+    for (int i = 0; i < 12; ++i)
+    {
+        cmd.joint_cmd[i].position = this->robot_data_->joint_data.joint_data[i].position;
+        cmd.joint_cmd[i].velocity = 0.0f;
+        cmd.joint_cmd[i].torque = 0.0f;
+        cmd.joint_cmd[i].kp = 0.0f;
+        cmd.joint_cmd[i].kd = 2.5f;
+    }
+    this->robot_joint_cmd_ = cmd;
+    this->sender_->SendCmd(cmd);
+
+    const auto now = std::chrono::steady_clock::now();
+    if (this->joint_monitor_last_print_t_.time_since_epoch().count() == 0 ||
+        std::chrono::duration<double>(now - this->joint_monitor_last_print_t_).count() >= 0.1)
+    {
+        this->joint_monitor_last_print_t_ = now;
+        ++this->joint_monitor_frame_;
+
+        std::cout << std::endl << LOGGER::INFO
+                  << "[JOINT_MONITOR] frame=" << this->joint_monitor_frame_
+                  << " tick=" << this->robot_data_->tick << std::endl;
+        for (int i = 0; i < 12; ++i)
+        {
+            const float q = this->robot_data_->joint_data.joint_data[i].position;
+            const float dq = this->robot_data_->joint_data.joint_data[i].velocity;
+            const float tau = this->robot_data_->joint_data.joint_data[i].torque;
+            std::cout << LOGGER::INFO
+                      << "  hw=" << i
+                      << " (" << LegNameFromIdx(i) << "_" << JointNameFromIdx(i) << ")"
+                      << " q=" << q
+                      << " dq=" << dq
+                      << " tau=" << tau
+                      << std::endl;
+        }
+    }
 }
 
 void RL_Real::RunJointOrderTest()

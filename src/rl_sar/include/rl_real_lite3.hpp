@@ -23,6 +23,7 @@
 #include <array>
 #include <chrono>
 #include <cstring>
+#include <cstdint>
 
 //Retroid Gamepad
 #include "gamepad.h"
@@ -63,6 +64,7 @@ private:
     void SetCommand(const RobotCommand<double> *command) override;
     void RunModel();
     void RobotControl();
+    void RunJointPositionMonitor();
 
     // loop
     std::shared_ptr<LoopFunc> loop_keyboard;
@@ -107,6 +109,11 @@ private:
     std::array<double, 12> joint_test_q0_{};
     std::chrono::steady_clock::time_point joint_test_t0_{};
     void RunJointOrderTest();
+
+    // read-only joint monitor mode
+    bool joint_monitor_mode_ = false;
+    std::chrono::steady_clock::time_point joint_monitor_last_print_t_{};
+    uint32_t joint_monitor_frame_ = 0;
 
     // others
     int motiontime = 0;
