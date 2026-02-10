@@ -223,39 +223,115 @@ void RL_Real::RobotControl()
 
     if (this->control.current_keyboard == Input::Keyboard::T)
     {
-        this->joint_monitor_mode_ = !this->joint_monitor_mode_;
+        this->single_joint_sine_mode_ = !this->single_joint_sine_mode_;
+        this->single_joint_sine_inited_ = false;
+        this->single_joint_last_print_t_ = std::chrono::steady_clock::time_point{};
+        this->single_joint_frame_ = 0;
+        this->joint_monitor_mode_ = false;
         this->joint_test_mode_ = false;
-        this->joint_monitor_last_print_t_ = std::chrono::steady_clock::time_point{};
-        this->joint_monitor_frame_ = 0;
-        this->joint_monitor_last_tick_ = 0;
-        this->joint_monitor_stale_count_ = 0;
 
         std::cout << std::endl << LOGGER::WARNING
-                  << "JOINT MONITOR mode: " << (this->joint_monitor_mode_ ? "ON" : "OFF") << std::endl;
-        if (this->joint_monitor_mode_)
+                  << "SINGLE-JOINT SINE TEST mode: " << (this->single_joint_sine_mode_ ? "ON" : "OFF") << std::endl;
+        if (this->single_joint_sine_mode_)
         {
             std::cout << LOGGER::NOTE
-                      << "Read-only monitor enabled. NO control command will be sent in this mode. Manually push joints and observe values. Press T again to exit."
+                      << "Put robot on stand. Keys: J/L select hw(0..11), 0-9 direct, O=10 P=11, I/K amp +/- , U/M freq +/- , Y/N kp +/- , H/G kd +/- , R relatch baseline, Space amp=0, T exit."
                       << std::endl;
-
-            if (!this->params.joint_mapping.empty())
-            {
-                std::cout << LOGGER::INFO << "[JOINT_MONITOR] dof->hw mapping:" << std::endl;
-                const int n = std::min<int>(this->params.num_of_dofs, static_cast<int>(this->params.joint_mapping.size()));
-                for (int i = 0; i < n; ++i)
-                {
-                    const std::string name = (i < static_cast<int>(this->params.joint_names.size())) ? this->params.joint_names[i] : ("dof_" + std::to_string(i));
-                    std::cout << LOGGER::INFO << "  dof=" << i << " name=" << name << " -> hw=" << this->params.joint_mapping[i] << std::endl;
-                }
-            }
         }
         this->control.current_keyboard = Input::Keyboard::None;
         this->control.current_gamepad = Input::Gamepad::None;
     }
 
-    if (this->joint_monitor_mode_)
+    if (this->single_joint_sine_mode_)
     {
-        this->RunJointPositionMonitor();
+        if (this->control.current_keyboard >= Input::Keyboard::Num0 &&
+            this->control.current_keyboard <= Input::Keyboard::Num9)
+        {
+            const int idx = static_cast<int>(this->control.current_keyboard) - static_cast<int>(Input::Keyboard::Num0);
+            this->single_joint_hw_idx_ = std::max(0, std::min(11, idx));
+            this->single_joint_sine_inited_ = false;
+            this->control.current_keyboard = Input::Keyboard::None;
+        }
+        if (this->control.current_keyboard == Input::Keyboard::O)
+        {
+            this->single_joint_hw_idx_ = 10;
+            this->single_joint_sine_inited_ = false;
+            this->control.current_keyboard = Input::Keyboard::None;
+        }
+        if (this->control.current_keyboard == Input::Keyboard::P)
+        {
+            this->single_joint_hw_idx_ = 11;
+            this->single_joint_sine_inited_ = false;
+            this->control.current_keyboard = Input::Keyboard::None;
+        }
+        if (this->control.current_keyboard == Input::Keyboard::J)
+        {
+            this->single_joint_hw_idx_ = (this->single_joint_hw_idx_ + 11) % 12;
+            this->single_joint_sine_inited_ = false;
+            this->control.current_keyboard = Input::Keyboard::None;
+        }
+        if (this->control.current_keyboard == Input::Keyboard::L)
+        {
+            this->single_joint_hw_idx_ = (this->single_joint_hw_idx_ + 1) % 12;
+            this->single_joint_sine_inited_ = false;
+            this->control.current_keyboard = Input::Keyboard::None;
+        }
+        if (this->control.current_keyboard == Input::Keyboard::I)
+        {
+            this->single_joint_amp_rad_ = std::min(1.2, this->single_joint_amp_rad_ + 0.02);
+            this->control.current_keyboard = Input::Keyboard::None;
+        }
+        if (this->control.current_keyboard == Input::Keyboard::K)
+        {
+            this->single_joint_amp_rad_ = std::max(0.0, this->single_joint_amp_rad_ - 0.02);
+            this->control.current_keyboard = Input::Keyboard::None;
+        }
+        if (this->control.current_keyboard == Input::Keyboard::U)
+        {
+            this->single_joint_freq_hz_ = std::min(3.0, this->single_joint_freq_hz_ + 0.05);
+            this->control.current_keyboard = Input::Keyboard::None;
+        }
+        if (this->control.current_keyboard == Input::Keyboard::M)
+        {
+            this->single_joint_freq_hz_ = std::max(0.05, this->single_joint_freq_hz_ - 0.05);
+            this->control.current_keyboard = Input::Keyboard::None;
+        }
+        if (this->control.current_keyboard == Input::Keyboard::Y)
+        {
+            this->single_joint_kp_ = std::min(120.0, this->single_joint_kp_ + 2.0);
+            this->single_joint_kp_other_ = this->single_joint_kp_;
+            this->control.current_keyboard = Input::Keyboard::None;
+        }
+        if (this->control.current_keyboard == Input::Keyboard::N)
+        {
+            this->single_joint_kp_ = std::max(0.0, this->single_joint_kp_ - 2.0);
+            this->single_joint_kp_other_ = this->single_joint_kp_;
+            this->control.current_keyboard = Input::Keyboard::None;
+        }
+        if (this->control.current_keyboard == Input::Keyboard::H)
+        {
+            this->single_joint_kd_ = std::min(5.0, this->single_joint_kd_ + 0.05);
+            this->single_joint_kd_other_ = this->single_joint_kd_;
+            this->control.current_keyboard = Input::Keyboard::None;
+        }
+        if (this->control.current_keyboard == Input::Keyboard::G)
+        {
+            this->single_joint_kd_ = std::max(0.0, this->single_joint_kd_ - 0.05);
+            this->single_joint_kd_other_ = this->single_joint_kd_;
+            this->control.current_keyboard = Input::Keyboard::None;
+        }
+        if (this->control.current_keyboard == Input::Keyboard::R)
+        {
+            this->single_joint_sine_inited_ = false;
+            this->control.current_keyboard = Input::Keyboard::None;
+        }
+        if (this->control.current_keyboard == Input::Keyboard::Space)
+        {
+            this->single_joint_amp_rad_ = 0.0;
+            this->control.current_keyboard = Input::Keyboard::None;
+        }
+
+        this->RunSingleJointSineTest();
         return;
     }
 
@@ -524,6 +600,100 @@ void RL_Real::RunJointPositionMonitor()
                       << " tau=" << tau
                       << std::endl;
         }
+    }
+}
+
+void RL_Real::RunSingleJointSineTest()
+{
+    if (!this->sender_ || !this->state_ready_.load())
+    {
+        return;
+    }
+
+    this->GetState(&this->robot_state);
+
+    const auto hw_to_dof = [this](int hw_idx) -> int
+    {
+        for (int dof = 0; dof < static_cast<int>(this->params.joint_mapping.size()); ++dof)
+        {
+            if (this->params.joint_mapping[dof] == hw_idx)
+            {
+                return dof;
+            }
+        }
+        return hw_idx;
+    };
+
+    const int idx = std::max(0, std::min(11, this->single_joint_hw_idx_));
+    if (!this->single_joint_sine_inited_)
+    {
+        for (int hw = 0; hw < 12; ++hw)
+        {
+            const int dof = hw_to_dof(hw);
+            this->single_joint_q0_[hw] = this->robot_state.motor_state.q[dof];
+        }
+        this->single_joint_t0_ = std::chrono::steady_clock::now();
+        this->single_joint_last_print_t_ = std::chrono::steady_clock::time_point{};
+        this->single_joint_frame_ = 0;
+        this->single_joint_sine_inited_ = true;
+
+        std::cout << LOGGER::INFO
+                  << "[SINE_TEST] hw_idx=" << idx
+                  << " (" << LegNameFromIdx(idx) << "_" << JointNameFromIdx(idx) << ")"
+                  << " base=" << this->single_joint_q0_[idx]
+                  << " amp=" << this->single_joint_amp_rad_
+                  << " freq=" << this->single_joint_freq_hz_
+                  << " kp=" << this->single_joint_kp_
+                  << " kd=" << this->single_joint_kd_
+                  << std::endl;
+    }
+
+    const auto now = std::chrono::steady_clock::now();
+    const double t = std::chrono::duration<double>(now - this->single_joint_t0_).count();
+    const double delta = this->single_joint_amp_rad_ * std::sin(2.0 * M_PI * this->single_joint_freq_hz_ * t);
+
+    RobotCmd cmd;
+    std::memset(&cmd, 0, sizeof(cmd));
+    for (int hw = 0; hw < 12; ++hw)
+    {
+        const double target = this->single_joint_q0_[hw] + ((hw == idx) ? delta : 0.0);
+        cmd.joint_cmd[hw].position = static_cast<float>(target);
+        cmd.joint_cmd[hw].velocity = 0.0f;
+        cmd.joint_cmd[hw].torque = 0.0f;
+        if (hw == idx)
+        {
+            cmd.joint_cmd[hw].kp = static_cast<float>(this->single_joint_kp_);
+            cmd.joint_cmd[hw].kd = static_cast<float>(this->single_joint_kd_);
+        }
+        else
+        {
+            cmd.joint_cmd[hw].kp = static_cast<float>(this->single_joint_kp_other_);
+            cmd.joint_cmd[hw].kd = static_cast<float>(this->single_joint_kd_other_);
+        }
+    }
+
+    this->robot_joint_cmd_ = cmd;
+    this->sender_->SendCmd(cmd);
+
+    if (this->single_joint_last_print_t_.time_since_epoch().count() == 0 ||
+        std::chrono::duration<double>(now - this->single_joint_last_print_t_).count() >= 0.1)
+    {
+        this->single_joint_last_print_t_ = now;
+        ++this->single_joint_frame_;
+
+        const int dof = hw_to_dof(idx);
+        const double q_real = this->robot_state.motor_state.q[dof];
+        const double dq_real = this->robot_state.motor_state.dq[dof];
+        const double q_cmd = static_cast<double>(cmd.joint_cmd[idx].position);
+
+        std::cout << LOGGER::INFO
+                  << "[SINE_TEST] frame=" << this->single_joint_frame_
+                  << " hw=" << idx
+                  << " real_q=" << q_real
+                  << " real_dq=" << dq_real
+                  << " cmd_q=" << q_cmd
+                  << " err=" << (q_cmd - q_real)
+                  << std::endl;
     }
 }
 

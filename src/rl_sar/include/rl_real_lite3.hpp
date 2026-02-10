@@ -72,6 +72,7 @@ private:
     void RunModel();
     void RobotControl();
     void RunJointPositionMonitor();
+    void RunSingleJointSineTest();
 
     // loop
     std::shared_ptr<LoopFunc> loop_keyboard;
@@ -123,6 +124,21 @@ private:
     uint32_t joint_monitor_frame_ = 0;
     uint32_t joint_monitor_last_tick_ = 0;
     int joint_monitor_stale_count_ = 0;
+
+    // single-joint sine test mode (send command, print real position)
+    bool single_joint_sine_mode_ = false;
+    bool single_joint_sine_inited_ = false;
+    int single_joint_hw_idx_ = 0;
+    double single_joint_amp_rad_ = 0.10;
+    double single_joint_freq_hz_ = 0.30;
+    double single_joint_kp_ = 12.0;
+    double single_joint_kd_ = 0.40;
+    double single_joint_kp_other_ = 12.0;
+    double single_joint_kd_other_ = 0.40;
+    std::array<double, 12> single_joint_q0_{};
+    std::chrono::steady_clock::time_point single_joint_t0_{};
+    std::chrono::steady_clock::time_point single_joint_last_print_t_{};
+    uint32_t single_joint_frame_ = 0;
 
     // others
     int motiontime = 0;
