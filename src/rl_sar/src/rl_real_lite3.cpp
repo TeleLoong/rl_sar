@@ -26,23 +26,23 @@ static const char* JointNameFromIdx(int hw_idx)
 }
 
 RL_Real::RL_Real()
-#if defined(USE_ROS2) && defined(USE_ROS)
+#if defined(USE_ROS2)
     : rclcpp::Node("rl_real_node")
 #endif
 {
-#if defined(USE_ROS1) && defined(USE_ROS)
+#if defined(USE_ROS1)
     ros::NodeHandle nh;
     this->cmd_vel_subscriber = nh.subscribe<geometry_msgs::Twist>("/cmd_vel", 10, &RL_Real::CmdvelCallback, this);
     this->handle_state_subscriber = nh.subscribe<geometry_msgs::Twist>("/handle_state", 10, &RL_Real::HandleStateCallback, this);
     this->imu_subscriber = nh.subscribe<sensor_msgs::Imu>("/imu/data", 50, &RL_Real::ImuCallback, this);
     this->joint_state_subscriber = nh.subscribe<sensor_msgs::JointState>("/joint_states", 50, &RL_Real::JointStateCallback, this);
-#elif defined(USE_ROS2) && defined(USE_ROS)
+#elif defined(USE_ROS2)
     this->cmd_vel_subscriber = this->create_subscription<geometry_msgs::msg::Twist>(
-        "/cmd_vel", rclcpp::SystemDefaultsQoS(),
+        "/cmd_vel", rclcpp::SensorDataQoS(),
         [this] (const geometry_msgs::msg::Twist::SharedPtr msg) {this->CmdvelCallback(msg);}
     );
     this->handle_state_subscriber = this->create_subscription<geometry_msgs::msg::Twist>(
-        "/handle_state", rclcpp::SystemDefaultsQoS(),
+        "/handle_state", rclcpp::SensorDataQoS(),
         [this] (const geometry_msgs::msg::Twist::SharedPtr msg) {this->HandleStateCallback(msg);}
     );
     this->imu_subscriber = this->create_subscription<sensor_msgs::msg::Imu>(
@@ -654,7 +654,7 @@ void RL_Real::RunModel()
         this->obs.ang_vel = torch::tensor(this->robot_state.imu.gyroscope).unsqueeze(0);
         if (this->control.navigation_mode)
         {
-#if !defined(USE_CMAKE) && defined(USE_ROS)
+#if !defined(USE_CMAKE) && (defined(USE_ROS1) || defined(USE_ROS2))
             this->obs.commands = torch::tensor({{this->cmd_vel.linear.x, this->cmd_vel.linear.y, this->cmd_vel.angular.z}});
 #endif
         }
@@ -745,11 +745,11 @@ void RL_Real::UDPRecv()
 {
 }
 
-#if !defined(USE_CMAKE) && defined(USE_ROS)
+#if !defined(USE_CMAKE) && (defined(USE_ROS1) || defined(USE_ROS2))
 void RL_Real::HandleStateCallback(
-#if defined(USE_ROS1) && defined(USE_ROS)
+#if defined(USE_ROS1)
     const geometry_msgs::Twist::ConstPtr &msg
-#elif defined(USE_ROS2) && defined(USE_ROS)
+#elif defined(USE_ROS2)
     const geometry_msgs::msg::Twist::SharedPtr msg
 #endif
 )
@@ -761,15 +761,15 @@ void RL_Real::HandleStateCallback(
 }
 
 void RL_Real::ImuCallback(
-#if defined(USE_ROS1) && defined(USE_ROS)
+#if defined(USE_ROS1)
     const sensor_msgs::Imu::ConstPtr &msg
-#elif defined(USE_ROS2) && defined(USE_ROS)
+#elif defined(USE_ROS2)
     const sensor_msgs::msg::Imu::SharedPtr msg
 #endif
 )
 {
     std::lock_guard<std::mutex> lock(this->ros_state_mutex_);
-#if defined(USE_ROS1) && defined(USE_ROS)
+#if defined(USE_ROS1)
     this->imu_quat_cache_[0] = msg->orientation.w;
     this->imu_quat_cache_[1] = msg->orientation.x;
     this->imu_quat_cache_[2] = msg->orientation.y;
@@ -777,7 +777,7 @@ void RL_Real::ImuCallback(
     this->imu_gyro_cache_[0] = msg->angular_velocity.x;
     this->imu_gyro_cache_[1] = msg->angular_velocity.y;
     this->imu_gyro_cache_[2] = msg->angular_velocity.z;
-#elif defined(USE_ROS2) && defined(USE_ROS)
+#elif defined(USE_ROS2)
     this->imu_quat_cache_[0] = msg->orientation.w;
     this->imu_quat_cache_[1] = msg->orientation.x;
     this->imu_quat_cache_[2] = msg->orientation.y;
@@ -791,20 +791,20 @@ void RL_Real::ImuCallback(
 }
 
 void RL_Real::JointStateCallback(
-#if defined(USE_ROS1) && defined(USE_ROS)
+#if defined(USE_ROS1)
     const sensor_msgs::JointState::ConstPtr &msg
-#elif defined(USE_ROS2) && defined(USE_ROS)
+#elif defined(USE_ROS2)
     const sensor_msgs::msg::JointState::SharedPtr msg
 #endif
 )
 {
     std::lock_guard<std::mutex> lock(this->ros_state_mutex_);
-#if defined(USE_ROS1) && defined(USE_ROS)
+#if defined(USE_ROS1)
     const auto &names = msg->name;
     const auto &positions = msg->position;
     const auto &velocities = msg->velocity;
     const auto &efforts = msg->effort;
-#elif defined(USE_ROS2) && defined(USE_ROS)
+#elif defined(USE_ROS2)
     const auto &names = msg->name;
     const auto &positions = msg->position;
     const auto &velocities = msg->velocity;
@@ -931,11 +931,11 @@ void RL_Real::EulerToQuaternion(float roll, float pitch, float yaw, float q[4])
 }
 
 
-#if !defined(USE_CMAKE) && defined(USE_ROS)
+#if !defined(USE_CMAKE) && (defined(USE_ROS1) || defined(USE_ROS2))
 void RL_Real::CmdvelCallback(
-#if defined(USE_ROS1) && defined(USE_ROS)
+#if defined(USE_ROS1)
     const geometry_msgs::Twist::ConstPtr &msg
-#elif defined(USE_ROS2) && defined(USE_ROS)
+#elif defined(USE_ROS2)
     const geometry_msgs::msg::Twist::SharedPtr msg
 #endif
 )
@@ -944,7 +944,7 @@ void RL_Real::CmdvelCallback(
 }
 #endif
 
-#if defined(USE_ROS1) && defined(USE_ROS)
+#if defined(USE_ROS1)
 void signalHandler(int signum)
 {
     ros::shutdown();
@@ -954,16 +954,16 @@ void signalHandler(int signum)
 
 int main(int argc, char **argv)
 {
-#if defined(USE_ROS1) && defined(USE_ROS)
+#if defined(USE_ROS1)
     signal(SIGINT, signalHandler);
     ros::init(argc, argv, "rl_sar");
     RL_Real rl_sar;
     ros::spin();
-#elif defined(USE_ROS2) && defined(USE_ROS)
+#elif defined(USE_ROS2)
     rclcpp::init(argc, argv);
     rclcpp::spin(std::make_shared<RL_Real>());
     rclcpp::shutdown();
-#elif defined(USE_CMAKE) || !defined(USE_ROS)
+#elif defined(USE_CMAKE) || (!defined(USE_ROS1) && !defined(USE_ROS2))
     RL_Real rl_sar;
     while (1) { sleep(10); }
 #endif
