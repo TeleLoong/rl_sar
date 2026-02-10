@@ -5,6 +5,10 @@
 
 #include "rl_real_lite3.hpp"
 
+#if (defined(USE_ROS1) || defined(USE_ROS2)) && !defined(USE_ROS)
+#define USE_ROS
+#endif
+
 static const char* LegNameFromIdx(int hw_idx)
 {
     static const char* kLegs[] = {"FL", "FR", "HL", "HR"};
@@ -42,11 +46,11 @@ RL_Real::RL_Real()
         [this] (const geometry_msgs::msg::Twist::SharedPtr msg) {this->HandleStateCallback(msg);}
     );
     this->imu_subscriber = this->create_subscription<sensor_msgs::msg::Imu>(
-        "/imu/data", rclcpp::SystemDefaultsQoS(),
+        "/imu/data", rclcpp::SensorDataQoS(),
         [this] (const sensor_msgs::msg::Imu::SharedPtr msg) {this->ImuCallback(msg);}
     );
     this->joint_state_subscriber = this->create_subscription<sensor_msgs::msg::JointState>(
-        "/joint_states", rclcpp::SystemDefaultsQoS(),
+        "/joint_states", rclcpp::SensorDataQoS(),
         [this] (const sensor_msgs::msg::JointState::SharedPtr msg) {this->JointStateCallback(msg);}
     );
 #endif
@@ -192,7 +196,11 @@ void RL_Real::SetCommand(const RobotCommand<double> *command)
     {
         if ((this->motiontime % 200) == 0)
         {
-            std::cout << LOGGER::WARNING << "State from ROS topics not ready; skip sending motor command." << std::endl;
+            std::cout << LOGGER::WARNING
+                      << "State from ROS topics not ready; skip sending motor command"
+                      << " (imu_ready=" << (this->imu_ready_.load() ? "true" : "false")
+                      << ", joint_state_ready=" << (this->joint_state_ready_.load() ? "true" : "false")
+                      << ")" << std::endl;
         }
         return;
     }

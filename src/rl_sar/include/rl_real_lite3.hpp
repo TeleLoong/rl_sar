@@ -33,12 +33,12 @@
 #include "retroid_gamepad.h"
 #include "gamepad_keys.h"
 
-#if defined(USE_ROS1) && defined(USE_ROS)
+#if defined(USE_ROS1)
 #include <ros/ros.h>
 #include <geometry_msgs/Twist.h>
 #include <sensor_msgs/Imu.h>
 #include <sensor_msgs/JointState.h>
-#elif defined(USE_ROS2) && defined(USE_ROS)
+#elif defined(USE_ROS2)
 #include <rclcpp/rclcpp.hpp>
 #include <geometry_msgs/msg/twist.hpp>
 #include <sensor_msgs/msg/imu.hpp>
@@ -49,7 +49,7 @@
 namespace plt = matplotlibcpp;
 
 class RL_Real : public RL
-#if defined(USE_ROS2) && defined(USE_ROS)
+#if defined(USE_ROS2)
     , public rclcpp::Node
 #endif
 {
@@ -146,7 +146,7 @@ private:
         "RB_Joint", "RB_Joint_1", "RB_Joint_2"
     };
 
-#if defined(USE_ROS1) && defined(USE_ROS)
+#if defined(USE_ROS1)
     geometry_msgs::Twist cmd_vel;
     geometry_msgs::Twist handle_state;
     ros::Subscriber cmd_vel_subscriber;
@@ -157,7 +157,7 @@ private:
     void HandleStateCallback(const geometry_msgs::Twist::ConstPtr &msg);
     void ImuCallback(const sensor_msgs::Imu::ConstPtr &msg);
     void JointStateCallback(const sensor_msgs::JointState::ConstPtr &msg);
-#elif defined(USE_ROS2) && defined(USE_ROS)
+#elif defined(USE_ROS2)
     geometry_msgs::msg::Twist cmd_vel;
     geometry_msgs::msg::Twist handle_state;
     rclcpp::Subscription<geometry_msgs::msg::Twist>::SharedPtr cmd_vel_subscriber;
