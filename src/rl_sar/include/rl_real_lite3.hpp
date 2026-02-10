@@ -24,6 +24,9 @@
 #include <chrono>
 #include <cstring>
 #include <cstdint>
+#include <mutex>
+#include <atomic>
+#include <vector>
 
 //Retroid Gamepad
 #include "gamepad.h"
@@ -33,9 +36,13 @@
 #if defined(USE_ROS1) && defined(USE_ROS)
 #include <ros/ros.h>
 #include <geometry_msgs/Twist.h>
+#include <sensor_msgs/Imu.h>
+#include <sensor_msgs/JointState.h>
 #elif defined(USE_ROS2) && defined(USE_ROS)
 #include <rclcpp/rclcpp.hpp>
 #include <geometry_msgs/msg/twist.hpp>
+#include <sensor_msgs/msg/imu.hpp>
+#include <sensor_msgs/msg/joint_state.hpp>
 #endif
 
 #include "matplotlibcpp.h"
@@ -121,15 +128,46 @@ private:
     int motiontime = 0;
     std::vector<double> mapped_joint_positions;
     std::vector<double> mapped_joint_velocities;
+    std::atomic<bool> state_ready_{false};
+    std::atomic<bool> imu_ready_{false};
+    std::atomic<bool> joint_state_ready_{false};
+    std::atomic<uint64_t> state_frame_counter_{0};
+    uint64_t stale_state_warn_counter_ = 0;
+    std::mutex ros_state_mutex_;
+    std::array<double, 4> imu_quat_cache_{{1.0, 0.0, 0.0, 0.0}};
+    std::array<double, 3> imu_gyro_cache_{{0.0, 0.0, 0.0}};
+    std::vector<double> joint_pos_cache_ = std::vector<double>(32, 0.0);
+    std::vector<double> joint_vel_cache_ = std::vector<double>(32, 0.0);
+    std::vector<double> joint_tau_cache_ = std::vector<double>(32, 0.0);
+    const std::array<const char*, 12> real_joint_names_ = {
+        "LF_Joint", "LF_Joint_1", "LF_Joint_2",
+        "RF_Joint", "RF_Joint_1", "RF_Joint_2",
+        "LB_Joint", "LB_Joint_1", "LB_Joint_2",
+        "RB_Joint", "RB_Joint_1", "RB_Joint_2"
+    };
 
 #if defined(USE_ROS1) && defined(USE_ROS)
     geometry_msgs::Twist cmd_vel;
+    geometry_msgs::Twist handle_state;
     ros::Subscriber cmd_vel_subscriber;
+    ros::Subscriber handle_state_subscriber;
+    ros::Subscriber imu_subscriber;
+    ros::Subscriber joint_state_subscriber;
     void CmdvelCallback(const geometry_msgs::Twist::ConstPtr &msg);
+    void HandleStateCallback(const geometry_msgs::Twist::ConstPtr &msg);
+    void ImuCallback(const sensor_msgs::Imu::ConstPtr &msg);
+    void JointStateCallback(const sensor_msgs::JointState::ConstPtr &msg);
 #elif defined(USE_ROS2) && defined(USE_ROS)
     geometry_msgs::msg::Twist cmd_vel;
+    geometry_msgs::msg::Twist handle_state;
     rclcpp::Subscription<geometry_msgs::msg::Twist>::SharedPtr cmd_vel_subscriber;
+    rclcpp::Subscription<geometry_msgs::msg::Twist>::SharedPtr handle_state_subscriber;
+    rclcpp::Subscription<sensor_msgs::msg::Imu>::SharedPtr imu_subscriber;
+    rclcpp::Subscription<sensor_msgs::msg::JointState>::SharedPtr joint_state_subscriber;
     void CmdvelCallback(const geometry_msgs::msg::Twist::SharedPtr msg);
+    void HandleStateCallback(const geometry_msgs::msg::Twist::SharedPtr msg);
+    void ImuCallback(const sensor_msgs::msg::Imu::SharedPtr msg);
+    void JointStateCallback(const sensor_msgs::msg::JointState::SharedPtr msg);
 #endif
 };
 

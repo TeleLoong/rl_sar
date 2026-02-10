@@ -29,10 +29,25 @@ RL_Real::RL_Real()
 #if defined(USE_ROS1) && defined(USE_ROS)
     ros::NodeHandle nh;
     this->cmd_vel_subscriber = nh.subscribe<geometry_msgs::Twist>("/cmd_vel", 10, &RL_Real::CmdvelCallback, this);
+    this->handle_state_subscriber = nh.subscribe<geometry_msgs::Twist>("/handle_state", 10, &RL_Real::HandleStateCallback, this);
+    this->imu_subscriber = nh.subscribe<sensor_msgs::Imu>("/imu/data", 50, &RL_Real::ImuCallback, this);
+    this->joint_state_subscriber = nh.subscribe<sensor_msgs::JointState>("/joint_states", 50, &RL_Real::JointStateCallback, this);
 #elif defined(USE_ROS2) && defined(USE_ROS)
     this->cmd_vel_subscriber = this->create_subscription<geometry_msgs::msg::Twist>(
         "/cmd_vel", rclcpp::SystemDefaultsQoS(),
         [this] (const geometry_msgs::msg::Twist::SharedPtr msg) {this->CmdvelCallback(msg);}
+    );
+    this->handle_state_subscriber = this->create_subscription<geometry_msgs::msg::Twist>(
+        "/handle_state", rclcpp::SystemDefaultsQoS(),
+        [this] (const geometry_msgs::msg::Twist::SharedPtr msg) {this->HandleStateCallback(msg);}
+    );
+    this->imu_subscriber = this->create_subscription<sensor_msgs::msg::Imu>(
+        "/imu/data", rclcpp::SystemDefaultsQoS(),
+        [this] (const sensor_msgs::msg::Imu::SharedPtr msg) {this->ImuCallback(msg);}
+    );
+    this->joint_state_subscriber = this->create_subscription<sensor_msgs::msg::JointState>(
+        "/joint_states", rclcpp::SystemDefaultsQoS(),
+        [this] (const sensor_msgs::msg::JointState::SharedPtr msg) {this->JointStateCallback(msg);}
     );
 #endif
 
@@ -61,17 +76,13 @@ RL_Real::RL_Real()
 
 
     // Network init
-    int local_port = 43987;
     int robot_port = 43893;
     std::string robot_ip = "192.168.1.120";
-    // init robot
-    this->receiver_ = new Receiver();
+    // init robot sender only (state is from ROS topics)
     this->sender_ = new Sender(robot_ip, robot_port);
     this->sender_->RobotStateInit();
     this->InitOutputs();
     this->InitControl();
-    this->receiver_->StartWork();
-    this->robot_data_ = &(receiver_->GetState());
 
     // init gamepad
     this->gamepad_ptr_ = std::make_shared<RetroidGamepad>(12121);
@@ -79,11 +90,9 @@ RL_Real::RL_Real()
     this->gamepad_ptr_->StartDataThread();
 
     // loop
-    this->loop_udpRecv = std::make_shared<LoopFunc>("loop_udpRecv", 0.002, std::bind(&RL_Real::UDPRecv, this), 3);
     this->loop_keyboard = std::make_shared<LoopFunc>("loop_keyboard", 0.05, std::bind(&RL_Real::KeyboardInterface, this));
     this->loop_control = std::make_shared<LoopFunc>("loop_control", this->params.dt, std::bind(&RL_Real::RobotControl, this));
     this->loop_rl = std::make_shared<LoopFunc>("loop_rl", this->params.dt * this->params.decimation, std::bind(&RL_Real::RunModel, this));
-    this->loop_udpRecv->start();
     this->loop_keyboard->start();
     this->loop_control->start();
     this->loop_rl->start();
@@ -104,7 +113,6 @@ RL_Real::RL_Real()
 
 RL_Real::~RL_Real()
 {
-    this->loop_udpRecv->shutdown();
     this->loop_keyboard->shutdown();
     this->loop_control->shutdown();
     this->loop_rl->shutdown();
@@ -156,32 +164,39 @@ void RL_Real::GetState(RobotState<double> *state)
     if ((this->rt_keys_.R1 != this->rt_keys_record_.R1)&&(this->rt_keys_.right != this->rt_keys_record_.right)) this->control.SetGamepad(Input::Gamepad::RB_DPadRight);
     if ((this->rt_keys_.R1 != this->rt_keys_record_.R1)&&(this->rt_keys_.R1 != this->rt_keys_record_.R1)) this->control.SetGamepad(Input::Gamepad::LB_RB);
 
-    this->control.x = this->rt_keys_.left_axis_y;
-    this->control.y = -this->rt_keys_.left_axis_x;
-    this->control.yaw = -this->rt_keys_.right_axis_x;
-       
-    float q[4];
-    EulerToQuaternion(this->robot_data_->imu.angle_roll, this->robot_data_->imu.angle_pitch, this->robot_data_->imu.angle_yaw, q);
+    std::lock_guard<std::mutex> lock(this->ros_state_mutex_);
 
-    state->imu.quaternion[0] = q[0]; // w
-    state->imu.quaternion[1] = q[1]; // x
-    state->imu.quaternion[2] = q[2]; // y
-    state->imu.quaternion[3] = q[3]; // z
+    state->imu.quaternion[0] = this->imu_quat_cache_[0];
+    state->imu.quaternion[1] = this->imu_quat_cache_[1];
+    state->imu.quaternion[2] = this->imu_quat_cache_[2];
+    state->imu.quaternion[3] = this->imu_quat_cache_[3];
 
-    state->imu.gyroscope[0] = this->robot_data_->imu.angular_velocity_roll;
-    state->imu.gyroscope[1] = this->robot_data_->imu.angular_velocity_pitch;
-    state->imu.gyroscope[2] = this->robot_data_->imu.angular_velocity_yaw;
+    state->imu.gyroscope[0] = this->imu_gyro_cache_[0];
+    state->imu.gyroscope[1] = this->imu_gyro_cache_[1];
+    state->imu.gyroscope[2] = this->imu_gyro_cache_[2];
 
     for (int i = 0; i < this->params.num_of_dofs; ++i)
     {
-        state->motor_state.q[i] = this->robot_data_->joint_data.joint_data[this->params.joint_mapping[i]].position;
-        state->motor_state.dq[i] = this->robot_data_->joint_data.joint_data[this->params.joint_mapping[i]].velocity;
-        state->motor_state.tau_est[i] = this->robot_data_->joint_data.joint_data[this->params.joint_mapping[i]].torque;
+        if (i < static_cast<int>(this->joint_pos_cache_.size()))
+        {
+            state->motor_state.q[i] = this->joint_pos_cache_[i];
+            state->motor_state.dq[i] = this->joint_vel_cache_[i];
+            state->motor_state.tau_est[i] = this->joint_tau_cache_[i];
+        }
     }
 }
 
 void RL_Real::SetCommand(const RobotCommand<double> *command)
 {
+    if (!this->state_ready_.load())
+    {
+        if ((this->motiontime % 200) == 0)
+        {
+            std::cout << LOGGER::WARNING << "State from ROS topics not ready; skip sending motor command." << std::endl;
+        }
+        return;
+    }
+
     for (int i = 0; i < this->params.num_of_dofs; ++i)
     {
         this->robot_joint_cmd_.joint_cmd[this->params.joint_mapping[i]].position = command->motor_command.q[i];
@@ -442,14 +457,14 @@ void RL_Real::RobotControl()
 
 void RL_Real::RunJointPositionMonitor()
 {
-    if (!this->robot_data_)
+    if (!this->state_ready_.load())
     {
         return;
     }
 
     this->GetState(&this->robot_state);
 
-    const uint32_t tick = this->robot_data_->tick;
+    const uint32_t tick = static_cast<uint32_t>(this->state_frame_counter_.load() & 0xFFFFFFFFu);
     if (tick == this->joint_monitor_last_tick_)
     {
         ++this->joint_monitor_stale_count_;
@@ -475,15 +490,24 @@ void RL_Real::RunJointPositionMonitor()
         if (this->joint_monitor_stale_count_ > 5)
         {
             std::cout << LOGGER::WARNING
-                      << "[JOINT_MONITOR] robot_data tick is not updating. Incoming state stream is likely invalid (network.toml ip/target_port or LAN route mismatch)."
+                      << "[JOINT_MONITOR] state frame is not updating. Incoming ROS state topics (/imu/data, joint_states) are likely stale or disconnected."
                       << std::endl;
         }
 
         for (int i = 0; i < 12; ++i)
         {
-            const float q = this->robot_data_->joint_data.joint_data[i].position;
-            const float dq = this->robot_data_->joint_data.joint_data[i].velocity;
-            const float tau = this->robot_data_->joint_data.joint_data[i].torque;
+            int dof = i;
+            for (int j = 0; j < static_cast<int>(this->params.joint_mapping.size()); ++j)
+            {
+                if (this->params.joint_mapping[j] == i)
+                {
+                    dof = j;
+                    break;
+                }
+            }
+            const float q = static_cast<float>(this->robot_state.motor_state.q[dof]);
+            const float dq = static_cast<float>(this->robot_state.motor_state.dq[dof]);
+            const float tau = static_cast<float>(this->robot_state.motor_state.tau_est[dof]);
             std::cout << LOGGER::INFO
                       << "  hw=" << i
                       << " (" << LegNameFromIdx(i) << "_" << JointNameFromIdx(i) << ")"
@@ -497,7 +521,7 @@ void RL_Real::RunJointPositionMonitor()
 
 void RL_Real::RunJointOrderTest()
 {
-    if (!this->sender_ || !this->robot_data_)
+    if (!this->sender_ || !this->state_ready_.load())
     {
         return;
     }
@@ -515,14 +539,32 @@ void RL_Real::RunJointOrderTest()
             else
             {
                 // Use measured state (hardware order).
-                this->joint_test_q0_[i] = static_cast<double>(this->robot_data_->joint_data.joint_data[i].position);
+                int dof = i;
+                for (int j = 0; j < static_cast<int>(this->params.joint_mapping.size()); ++j)
+                {
+                    if (this->params.joint_mapping[j] == i)
+                    {
+                        dof = j;
+                        break;
+                    }
+                }
+                this->joint_test_q0_[i] = this->robot_state.motor_state.q[dof];
             }
         }
         this->joint_test_t0_ = std::chrono::steady_clock::now();
         this->joint_test_inited_ = true;
 
         const double base_cmd = static_cast<double>(this->robot_joint_cmd_.joint_cmd[idx].position);
-        const double base_state = static_cast<double>(this->robot_data_->joint_data.joint_data[idx].position);
+        int dof = idx;
+        for (int j = 0; j < static_cast<int>(this->params.joint_mapping.size()); ++j)
+        {
+            if (this->params.joint_mapping[j] == idx)
+            {
+                dof = j;
+                break;
+            }
+        }
+        const double base_state = this->robot_state.motor_state.q[dof];
         const double base_diff = base_state - base_cmd;
         const auto WaveName = [this]() -> const char*
         {
@@ -680,7 +722,7 @@ void RL_Real::Plot()
     {
         this->plot_real_joint_pos[i].erase(this->plot_real_joint_pos[i].begin());
         this->plot_target_joint_pos[i].erase(this->plot_target_joint_pos[i].begin());
-        this->plot_real_joint_pos[i].push_back(this->robot_data_->joint_data.joint_data[this->params.joint_mapping[i]].position);
+        this->plot_real_joint_pos[i].push_back(this->robot_state.motor_state.q[i]);
         this->plot_target_joint_pos[i].push_back(this->robot_joint_cmd_.joint_cmd[this->params.joint_mapping[i]].position);
         plt::subplot(this->params.num_of_dofs, 1, i + 1);
         plt::named_plot("_real_joint_pos", this->plot_t, this->plot_real_joint_pos[i], "r");
@@ -693,11 +735,173 @@ void RL_Real::Plot()
 
 void RL_Real::UDPRecv()
 {
-    if (receiver_)
+}
+
+#if !defined(USE_CMAKE) && defined(USE_ROS)
+void RL_Real::HandleStateCallback(
+#if defined(USE_ROS1) && defined(USE_ROS)
+    const geometry_msgs::Twist::ConstPtr &msg
+#elif defined(USE_ROS2) && defined(USE_ROS)
+    const geometry_msgs::msg::Twist::SharedPtr msg
+#endif
+)
+{
+    this->handle_state = *msg;
+    this->control.x = this->handle_state.linear.x;
+    this->control.y = this->handle_state.linear.y;
+    this->control.yaw = this->handle_state.angular.z;
+}
+
+void RL_Real::ImuCallback(
+#if defined(USE_ROS1) && defined(USE_ROS)
+    const sensor_msgs::Imu::ConstPtr &msg
+#elif defined(USE_ROS2) && defined(USE_ROS)
+    const sensor_msgs::msg::Imu::SharedPtr msg
+#endif
+)
+{
+    std::lock_guard<std::mutex> lock(this->ros_state_mutex_);
+#if defined(USE_ROS1) && defined(USE_ROS)
+    this->imu_quat_cache_[0] = msg->orientation.w;
+    this->imu_quat_cache_[1] = msg->orientation.x;
+    this->imu_quat_cache_[2] = msg->orientation.y;
+    this->imu_quat_cache_[3] = msg->orientation.z;
+    this->imu_gyro_cache_[0] = msg->angular_velocity.x;
+    this->imu_gyro_cache_[1] = msg->angular_velocity.y;
+    this->imu_gyro_cache_[2] = msg->angular_velocity.z;
+#elif defined(USE_ROS2) && defined(USE_ROS)
+    this->imu_quat_cache_[0] = msg->orientation.w;
+    this->imu_quat_cache_[1] = msg->orientation.x;
+    this->imu_quat_cache_[2] = msg->orientation.y;
+    this->imu_quat_cache_[3] = msg->orientation.z;
+    this->imu_gyro_cache_[0] = msg->angular_velocity.x;
+    this->imu_gyro_cache_[1] = msg->angular_velocity.y;
+    this->imu_gyro_cache_[2] = msg->angular_velocity.z;
+#endif
+    this->imu_ready_.store(true);
+    this->state_ready_.store(this->imu_ready_.load() && this->joint_state_ready_.load());
+}
+
+void RL_Real::JointStateCallback(
+#if defined(USE_ROS1) && defined(USE_ROS)
+    const sensor_msgs::JointState::ConstPtr &msg
+#elif defined(USE_ROS2) && defined(USE_ROS)
+    const sensor_msgs::msg::JointState::SharedPtr msg
+#endif
+)
+{
+    std::lock_guard<std::mutex> lock(this->ros_state_mutex_);
+#if defined(USE_ROS1) && defined(USE_ROS)
+    const auto &names = msg->name;
+    const auto &positions = msg->position;
+    const auto &velocities = msg->velocity;
+    const auto &efforts = msg->effort;
+#elif defined(USE_ROS2) && defined(USE_ROS)
+    const auto &names = msg->name;
+    const auto &positions = msg->position;
+    const auto &velocities = msg->velocity;
+    const auto &efforts = msg->effort;
+#endif
+
+    int matched_with_sim_name = 0;
+    int matched_with_real_name = 0;
+    int fallback_by_index = 0;
+
+    for (int i = 0; i < this->params.num_of_dofs; ++i)
     {
-        robot_data_ = &(receiver_->GetState());
+        const std::string sim_name = (i < static_cast<int>(this->params.joint_names.size())) ? this->params.joint_names[i] : "";
+        const std::string real_name = (i < static_cast<int>(this->real_joint_names_.size())) ? this->real_joint_names_[i] : "";
+
+        bool matched = false;
+        for (size_t j = 0; j < names.size(); ++j)
+        {
+            if (!sim_name.empty() && names[j] == sim_name)
+            {
+                if (i < static_cast<int>(this->joint_pos_cache_.size()) && j < positions.size())
+                {
+                    this->joint_pos_cache_[i] = positions[j];
+                }
+                if (i < static_cast<int>(this->joint_vel_cache_.size()) && j < velocities.size())
+                {
+                    this->joint_vel_cache_[i] = velocities[j];
+                }
+                if (i < static_cast<int>(this->joint_tau_cache_.size()) && j < efforts.size())
+                {
+                    this->joint_tau_cache_[i] = efforts[j];
+                }
+                matched = true;
+                ++matched_with_sim_name;
+                break;
+            }
+
+            if (!real_name.empty() && names[j] == real_name)
+            {
+                if (i < static_cast<int>(this->joint_pos_cache_.size()) && j < positions.size())
+                {
+                    this->joint_pos_cache_[i] = positions[j];
+                }
+                if (i < static_cast<int>(this->joint_vel_cache_.size()) && j < velocities.size())
+                {
+                    this->joint_vel_cache_[i] = velocities[j];
+                }
+                if (i < static_cast<int>(this->joint_tau_cache_.size()) && j < efforts.size())
+                {
+                    this->joint_tau_cache_[i] = efforts[j];
+                }
+                matched = true;
+                ++matched_with_real_name;
+                break;
+            }
+        }
+
+        if (!matched)
+        {
+            ++fallback_by_index;
+            if (i < static_cast<int>(this->joint_pos_cache_.size()) && i < static_cast<int>(positions.size()))
+            {
+                this->joint_pos_cache_[i] = positions[i];
+            }
+            if (i < static_cast<int>(this->joint_vel_cache_.size()) && i < static_cast<int>(velocities.size()))
+            {
+                this->joint_vel_cache_[i] = velocities[i];
+            }
+            if (i < static_cast<int>(this->joint_tau_cache_.size()) && i < static_cast<int>(efforts.size()))
+            {
+                this->joint_tau_cache_[i] = efforts[i];
+            }
+        }
+    }
+
+    if (!names.empty() && fallback_by_index > 0)
+    {
+        ++this->stale_state_warn_counter_;
+        if ((this->stale_state_warn_counter_ % 200) == 1)
+        {
+            if (matched_with_real_name > 0 && matched_with_sim_name == 0)
+            {
+                std::cout << LOGGER::INFO
+                          << "Joint names matched REAL alias set (LF/RF/LB/RB)."
+                          << std::endl;
+            }
+            else
+            {
+                std::cout << LOGGER::WARNING
+                          << "Joint names are partially unmatched; fallback to index-based joint_states mapping is active for "
+                          << fallback_by_index << " joints."
+                          << std::endl;
+            }
+        }
+    }
+
+    this->joint_state_ready_.store(!names.empty());
+    this->state_ready_.store(this->imu_ready_.load() && this->joint_state_ready_.load());
+    if (this->state_ready_.load())
+    {
+        this->state_frame_counter_.fetch_add(1);
     }
 }
+
+#endif
 
 void RL_Real::EulerToQuaternion(float roll, float pitch, float yaw, float q[4])
 {
