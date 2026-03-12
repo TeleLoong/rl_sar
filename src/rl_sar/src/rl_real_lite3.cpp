@@ -84,7 +84,7 @@ RL_Real::RL_Real()
         std::bind(&RL_Real::DepthImageCallback, this, std::placeholders::_1));
     this->processed_depth_publisher = this->create_publisher<sensor_msgs::msg::Image>(
         "/camera/camera/depth/processed", rclcpp::SystemDefaultsQoS());
-        depth_buffer = DepthBuffer(1, 60, 86, 2);  // 1个环境，2帧历史 -> 推理用1帧（丢弃最新帧形成一帧延迟）
+    depth_buffer = DepthBuffer(1, 60, 86, this->nav_vision_channels_ + 1);
 #endif
 
     // init hierarchical nav policy (best-effort; safe to fail)
@@ -552,6 +552,23 @@ bool RL_Real::InitHierarchicalNav()
     if (config["nav_dt"]) this->nav_dt_ = config["nav_dt"].as<double>();
     if (config["nav_episode_length_s"]) this->nav_episode_length_s_ = config["nav_episode_length_s"].as<double>();
     if (config["clip_commands"]) this->nav_clip_commands_ = config["clip_commands"].as<double>();
+    if (config["vision_channels"])
+    {
+        const int channels = config["vision_channels"].as<int>();
+        this->nav_vision_channels_ = (channels > 0) ? channels : 1;
+    }
+    if (this->nav_vision_channels_ < 1)
+    {
+        this->nav_vision_channels_ = 1;
+    }
+
+    // Keep one extra newest frame in buffer and drop it at inference time for one-frame delay.
+    depth_buffer = DepthBuffer(1, 60, 86, this->nav_vision_channels_ + 1);
+    std::cout << LOGGER::INFO
+              << "Nav vision_channels=" << this->nav_vision_channels_
+              << ", depth_history_steps=" << (this->nav_vision_channels_ + 1)
+              << std::endl;
+
     this->nav_timer_left_.store(this->nav_episode_length_s_);
     this->nav_time_io_.store(0.0);
     this->nav_time_io_hf_.store(0.0);
@@ -649,6 +666,28 @@ void RL_Real::UpdateHighFrequencyObs()
         std::lock_guard<std::mutex> lock(this->nav_highfreq_mutex_);
         this->nav_highfreq_buf_.insert(hf);
     }
+}
+
+void RL_Real::DisableNavigationWithError(const std::string &stage, const std::string &detail)
+{
+    this->control.navigation_mode = false;
+    this->nav_enabled_.store(false);
+    this->nav_enable_request_.store(false);
+    this->nav_cmd_x_.store(0.0);
+    this->nav_cmd_y_.store(0.0);
+    this->nav_cmd_yaw_.store(0.0);
+    if (this->nav_high_command_.defined())
+    {
+        this->nav_high_command_.zero_();
+    }
+    else
+    {
+        this->nav_high_command_ = torch::zeros({1, 3}, torch::dtype(torch::kFloat32));
+    }
+
+    std::cout << LOGGER::ERROR
+              << "Navigation disabled at " << stage << ": " << detail
+              << std::endl;
 }
 
 void RL_Real::RunHighLevel()
@@ -801,11 +840,49 @@ void RL_Real::RunHighLevel()
     try
     {
         torch::Tensor depth = depth_buffer.get_depth_vec().to(torch::kFloat32);
+        if (!depth.defined())
+        {
+            this->DisableNavigationWithError("vision_input", "depth tensor is undefined");
+            return;
+        }
+        if (depth.dim() != 4)
+        {
+            std::ostringstream oss;
+            oss << "depth tensor rank mismatch, expected 4D [B,C,H,W], got dim=" << depth.dim();
+            this->DisableNavigationWithError("vision_input", oss.str());
+            return;
+        }
+        const int64_t channels = depth.size(1);
+        if (channels != static_cast<int64_t>(this->nav_vision_channels_))
+        {
+            std::ostringstream oss;
+            oss << "depth channels mismatch, expected " << this->nav_vision_channels_
+                << ", got " << channels
+                << " (history_steps=" << (this->nav_vision_channels_ + 1) << ")";
+            this->DisableNavigationWithError("vision_input", oss.str());
+            return;
+        }
         vision_feat = this->nav_vision_model_.forward({depth}).toTensor();
+    }
+    catch (const c10::Error &e)
+    {
+        this->DisableNavigationWithError("vision_forward", e.what());
+        return;
+    }
+    catch (const std::exception &e)
+    {
+        this->DisableNavigationWithError("vision_forward", e.what());
+        return;
     }
     catch (...)
     {
-        vision_feat = torch::zeros({1, 0}, torch::dtype(torch::kFloat32));
+        this->DisableNavigationWithError("vision_forward", "unknown exception");
+        return;
+    }
+    if (!vision_feat.defined())
+    {
+        this->DisableNavigationWithError("vision_forward", "vision feature is undefined");
+        return;
     }
 
     torch::Tensor cmd;
@@ -818,7 +895,17 @@ void RL_Real::RunHighLevel()
     }
     catch (const c10::Error &e)
     {
-        std::cout << LOGGER::WARNING << "Nav high forward failed: " << e.what() << std::endl;
+        this->DisableNavigationWithError("high_forward", e.what());
+        return;
+    }
+    catch (const std::exception &e)
+    {
+        this->DisableNavigationWithError("high_forward", e.what());
+        return;
+    }
+    catch (...)
+    {
+        this->DisableNavigationWithError("high_forward", "unknown exception");
         return;
     }
 
@@ -853,13 +940,20 @@ void RL_Real::RunHighLevel()
             }
         }
     }
+    catch (const std::exception &e)
+    {
+        this->DisableNavigationWithError("output_unpack", e.what());
+        return;
+    }
     catch (...)
     {
+        this->DisableNavigationWithError("output_unpack", "unknown exception");
         return;
     }
 
     if (!cmd.defined() || cmd.numel() < 3)
     {
+        this->DisableNavigationWithError("output_validate", "invalid high-level output: command tensor missing or too short");
         return;
     }
 

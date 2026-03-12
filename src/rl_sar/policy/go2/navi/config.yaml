@@ -5,6 +5,7 @@ go2/navi:
   model_name: "himloco.pt"
   high_model_name: "go2_navi_high.pt"
   vision_model_name: "go2_navi_vision.pt"
+  vision_channels: 2
   nav_dt: 0.1
   nav_episode_length_s: 30.0
   clip_commands: 3.0
