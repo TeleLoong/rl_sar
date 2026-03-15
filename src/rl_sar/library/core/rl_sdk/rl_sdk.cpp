@@ -173,7 +173,7 @@ void RL::InitRL(std::string robot_path)
     // init model
     std::string model_path = std::string(CMAKE_CURRENT_SOURCE_DIR) + "/policy/" + robot_path + "/" + this->params.model_name;
     this->model = torch::jit::load(model_path);
-
+    printf("RL model loaded from %s\n", model_path.c_str());
     // std::string vision_head_path = std::string(CMAKE_CURRENT_SOURCE_DIR) + "/policy/" + robot_path + "/head_1.pt";
     // this->vision_head = torch::jit::load(vision_head_path);
     // std::string vision_backbone_path =  std::string(CMAKE_CURRENT_SOURCE_DIR) + "/policy/" + robot_path + "/backbone_no_depth.pt";
