@@ -84,7 +84,7 @@ RL_Real::RL_Real()
         std::bind(&RL_Real::DepthImageCallback, this, std::placeholders::_1));
     this->processed_depth_publisher = this->create_publisher<sensor_msgs::msg::Image>(
         "/camera/camera/depth/processed", rclcpp::SystemDefaultsQoS());
-    depth_buffer = DepthBuffer(1, 60, 86, this->nav_vision_channels_ + 1);
+    depth_buffer = DepthBuffer(1, 30, 43, this->nav_vision_channels_ + 1);
 #endif
 
     // init hierarchical nav policy (best-effort; safe to fail)
@@ -491,15 +491,15 @@ void RL_Real::EulerToQuaternion(float roll, float pitch, float yaw, float q[4])
 #if defined(USE_ROS2) && defined(USE_ROS)
 void RL_Real::DepthImageCallback(const sensor_msgs::msg::Image::SharedPtr msg)
 {
-    // 只在每个时间步更新一次深度图
-    if (this->motion_time % 5 == 0) {  // 每5个时间步更新一次
+    // Match 10Hz temporal spacing used by navigation policy (assuming 60Hz depth stream).
+    constexpr int kDepthSubsample = 6;
+    if ((this->motion_time % kDepthSubsample) == 0) {
         torch::Tensor processed_depth = depth_buffer.process_depth_image(msg,
             this->processed_depth_publisher);
-        // processed_depth shape: [60, 86], insert函数会处理batch维度
+        // processed_depth shape: [30, 43], insert函数会处理batch维度
         depth_buffer.insert(processed_depth);
-        this->motion_time = 1;
     }
-    this->motion_time++;
+    ++this->motion_time;
 }
 
 void RL_Real::NavGoalBodyCallback(const geometry_msgs::msg::Pose2D::SharedPtr msg)
@@ -563,7 +563,7 @@ bool RL_Real::InitHierarchicalNav()
     }
 
     // Keep one extra newest frame in buffer and drop it at inference time for one-frame delay.
-    depth_buffer = DepthBuffer(1, 60, 86, this->nav_vision_channels_ + 1);
+    depth_buffer = DepthBuffer(1, 30, 43, this->nav_vision_channels_ + 1);
     std::cout << LOGGER::INFO
               << "Nav vision_channels=" << this->nav_vision_channels_
               << ", depth_history_steps=" << (this->nav_vision_channels_ + 1)

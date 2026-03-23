@@ -50,7 +50,7 @@ aluminum peripherial evaluation case.
                                           accel_fps:=63
                                           gyro_fps:=200
 
-                                          clip_distance:=-1.0
+                                          clip_distance:=5.0
                                           depth_width:=848
                                           depth_height:=480
                                           depth_fps:=60

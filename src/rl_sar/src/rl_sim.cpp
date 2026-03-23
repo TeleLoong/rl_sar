@@ -305,7 +305,7 @@ RL_Sim::RL_Sim()
 
     this->processed_depth_publisher = this->create_publisher<sensor_msgs::msg::Image>(
         "/camera/camera/depth/processed", rclcpp::SystemDefaultsQoS());
-    depth_buffer = DepthBuffer(1, 60, 86, this->nav_vision_channels_ + 1);
+    depth_buffer = DepthBuffer(1, 30, 43, this->nav_vision_channels_ + 1);
 
     // hierarchical navigation: body-frame goal only (no odom dependency)
     this->nav_goal_body_subscriber = this->create_subscription<geometry_msgs::msg::Pose2D>(
@@ -358,16 +358,16 @@ RL_Sim::RL_Sim()
 }
 void RL_Sim::DepthImageCallback(const sensor_msgs::msg::Image::SharedPtr msg)
 {
-    // 只在每个时间步更新一次深度图
-    if (this->motion_time % 5 == 0) {  // 每5个时间步更新一次
+    // Isaac Gym nav rollout uses depth at 10Hz. Camera is configured at 60Hz in lite3 xacro,
+    // so downsample by 6 to keep temporal spacing aligned.
+    constexpr int kDepthSubsample = 6;
+    if ((this->motion_time % kDepthSubsample) == 0) {
         torch::Tensor processed_depth = depth_buffer.process_depth_image(msg,
             this->processed_depth_publisher);
-        // torch::Tensor processed_depth = depth_buffer.process_depth_image_old(msg);
-        // processed_depth shape: [60, 86], insert函数会处理batch维度
+        // processed_depth shape: [30, 43], insert函数会处理batch维度
         depth_buffer.insert(processed_depth);
-        this->motion_time = 1;
     }
-    this->motion_time++;
+    ++this->motion_time;
 }
 RL_Sim::~RL_Sim()
 {
@@ -1105,7 +1105,23 @@ bool RL_Sim::InitHierarchicalNav()
     // optional params (safe defaults)
     if (config["nav_dt"]) this->nav_dt_ = config["nav_dt"].as<double>();
     if (config["nav_episode_length_s"]) this->nav_episode_length_s_ = config["nav_episode_length_s"].as<double>();
-    if (config["clip_commands"]) this->nav_clip_commands_ = config["clip_commands"].as<double>();
+    if (config["clip_commands_lin"])
+    {
+        this->nav_clip_lin_ = config["clip_commands_lin"].as<double>();
+    }
+    if (config["clip_commands_ang"])
+    {
+        this->nav_clip_ang_ = config["clip_commands_ang"].as<double>();
+    }
+    // backward compatibility: old single clip key applies to both if split keys are absent
+    if (config["clip_commands"] && !config["clip_commands_lin"] && !config["clip_commands_ang"])
+    {
+        const double legacy_clip = config["clip_commands"].as<double>();
+        this->nav_clip_lin_ = legacy_clip;
+        this->nav_clip_ang_ = legacy_clip;
+    }
+    this->nav_clip_lin_ = std::fabs(this->nav_clip_lin_);
+    this->nav_clip_ang_ = std::fabs(this->nav_clip_ang_);
     if (config["vision_channels"])
     {
         const int channels = config["vision_channels"].as<int>();
@@ -1117,10 +1133,12 @@ bool RL_Sim::InitHierarchicalNav()
     }
 
     // Keep one extra newest frame in buffer and drop it at inference time for one-frame delay.
-    depth_buffer = DepthBuffer(1, 60, 86, this->nav_vision_channels_ + 1);
+    depth_buffer = DepthBuffer(1, 30, 43, this->nav_vision_channels_ + 1);
     std::cout << LOGGER::INFO
               << "Nav vision_channels=" << this->nav_vision_channels_
               << ", depth_history_steps=" << (this->nav_vision_channels_ + 1)
+              << ", clip_lin=" << this->nav_clip_lin_
+              << ", clip_ang=" << this->nav_clip_ang_
               << std::endl;
 
     this->nav_timer_left_.store(this->nav_episode_length_s_);
@@ -1155,9 +1173,9 @@ bool RL_Sim::InitHierarchicalNav()
 
     // training-aligned dims (go2)
     const int dof = this->params.num_of_dofs; // 12
-    const int hf_dim = 1 + 3 + 3 + dof + dof + dof ;
-    const int obs_dim = 3 + 3 + 3 + 1 + 3 + 3 + dof + dof + dof;
-    const int obs_io_dim = 3 + 3 + 1 + 3 + 3 + dof + dof + dof;
+    const int hf_dim = 1 + 3 + 3 + dof + dof + dof -12;
+    const int obs_dim = 3 + 3 + 3 + 1 + 3 + 3 + dof + dof + dof - 15;
+    const int obs_io_dim = 3 + 3 + 3 + 1 + 3 + 3 + dof + dof + dof - 15;
 
     this->nav_highfreq_buf_ = ObservationBuffer(1, {hf_dim}, this->nav_highfreq_hist_len_, "time");
     this->nav_obs_hist_buf_ = ObservationBuffer(1, {obs_dim}, this->nav_obs_hist_len_, "time");
@@ -1215,7 +1233,7 @@ void RL_Sim::UpdateHighFrequencyObs()
         }
     }
 
-    torch::Tensor hf = torch::cat({time_io, base_ang_vel, projected_gravity, dof_pos_term, dof_vel_term, actions}, 1);
+    torch::Tensor hf = torch::cat({time_io, base_ang_vel, projected_gravity, dof_pos_term, dof_vel_term}, 1);
     {
         std::lock_guard<std::mutex> lock(this->nav_highfreq_mutex_);
         this->nav_highfreq_buf_.insert(hf);
@@ -1350,24 +1368,25 @@ void RL_Sim::UpdateHighFrequencyObs()
     torch::Tensor obs_frame = torch::cat({
         this->nav_position_targets_body_initial_.to(torch::kFloat32),
         this->nav_spawn_positions_body_initial_.to(torch::kFloat32),
-        high_command_scaled,
+        // high_command_scaled,
         timer_tensor,
         base_ang_vel,
         projected_gravity,
         dof_pos_term,
         dof_vel_term,
-        actions,
+        // actions,
     }, 1);
 
     torch::Tensor obs_io_frame = torch::cat({
         this->nav_position_targets_body_initial_.to(torch::kFloat32),
         this->nav_spawn_positions_body_initial_.to(torch::kFloat32),
         time_io_tensor,
+        // high_command_scaled,
         base_ang_vel,
         projected_gravity,
         dof_pos_term,
         dof_vel_term,
-        actions,
+        // actions,
     }, 1);
 
     torch::Tensor obs_io_frame_hf = torch::cat({
@@ -1376,7 +1395,7 @@ void RL_Sim::UpdateHighFrequencyObs()
         projected_gravity,
         dof_pos_term,
         dof_vel_term,
-        actions,
+        // actions,
     }, 1);
 
     if (new_goal)
@@ -1467,7 +1486,7 @@ void RL_Sim::UpdateHighFrequencyObs()
 		            ++nav_input_print_count;
 		        }
 
-	        std::vector<torch::jit::IValue> inputs = {obs_frame, obs_hist, obs_io_hist, vision_feat, hf_hist};
+	        std::vector<torch::jit::IValue> inputs = {obs_frame, obs_io_hist, vision_feat, hf_hist};
 	        out = this->nav_high_model_.forward(inputs);
 	    }
 	    catch (const c10::Error &e)
@@ -1521,8 +1540,13 @@ void RL_Sim::UpdateHighFrequencyObs()
 
     const torch::Tensor cmd_raw = cmd.to(torch::kFloat32);
 
-    // clip + momentum smoothing
-    cmd = torch::clamp(cmd_raw, -static_cast<float>(this->nav_clip_commands_), static_cast<float>(this->nav_clip_commands_));
+    // split clip for high-level command: [x, y] use linear limit, [yaw] uses angular limit
+    const auto cmd_device = cmd_raw.device();
+    const torch::Tensor clip_high = torch::tensor(
+        {static_cast<float>(this->nav_clip_lin_), static_cast<float>(this->nav_clip_lin_), static_cast<float>(this->nav_clip_ang_)},
+        torch::TensorOptions().dtype(torch::kFloat32).device(cmd_device)).view({1, 3});
+    const torch::Tensor clip_low = -clip_high;
+    cmd = torch::max(torch::min(cmd_raw, clip_high), clip_low);
 
     
         static int dbg_tick = 0;
