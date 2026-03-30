@@ -7,9 +7,16 @@ lite3/navi:
   vision_model_name: "head_1.pt"
   vision_channels: 8
   nav_dt: 0.1
-  nav_episode_length_s: 45.0
-  clip_commands_lin: 1.0
-  clip_commands_ang: 1.0
+  nav_episode_length_s: 60.0
+  # Training-aligned command shaping (same names as nx_deploy_lite3):
+  # source -> LPF(alpha) -> step limit -> clip
+  high_command_filter_alpha: 0.8
+  high_command_max_step_lin_x: 0.1
+  high_command_max_step_lin_y: 0.05
+  high_command_max_step_yaw: 0.12
+  clip_commands_vx: 1.0
+  clip_commands_vy: 0.5
+  clip_commands_w: 0.6
   momentum_factor: 0.95
   num_observations: 45
   observations: ["commands", "ang_vel", "gravity_vec", "dof_pos", "dof_vel", "actions"]

@@ -234,7 +234,7 @@ def generate_launch_description():
             default_value=TextSubstitution(text=""),
         ),
         DeclareLaunchArgument("wall_thickness", description="Wall thickness (m).", default_value=TextSubstitution(text="0.3")),
-        DeclareLaunchArgument("wall_height", description="Wall height (m).", default_value=TextSubstitution(text="0.5")),
+        DeclareLaunchArgument("wall_height", description="Wall height (m).", default_value=TextSubstitution(text="2.0")),
         DeclareLaunchArgument("cell_size", description="Maze cell size (m) or empty.", default_value=TextSubstitution(text="")),
         DeclareLaunchArgument("check_inflation", description="Inflation for reachability check (m).", default_value=TextSubstitution(text="0.4")),
         DeclareLaunchArgument("spawn_keepout", description="Keepout radius around spawn (m).", default_value=TextSubstitution(text="0.6")),

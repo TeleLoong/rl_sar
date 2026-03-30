@@ -205,8 +205,15 @@ public:
     int nav_vision_channels_ = 2;      // expected channels for nav_vision_model input
     double nav_dt_ = 0.1;               // 10Hz
     double nav_episode_length_s_ = 30;  // default if not specified
-    double nav_clip_lin_ = 1.0;         // clip for cmd x/y
-    double nav_clip_ang_ = 1.0;         // clip for cmd yaw
+    // Training-aligned command shaping:
+    // source -> LPF(alpha) -> step limit -> clip
+    double nav_command_clip_x_ = 1.0;
+    double nav_command_clip_y_ = 0.5;
+    double nav_command_clip_yaw_ = 0.6;
+    double nav_high_command_filter_alpha_ = 0.8;
+    double nav_high_command_max_step_x_ = 0.1;
+    double nav_high_command_max_step_y_ = 0.05;
+    double nav_high_command_max_step_yaw_ = 0.12;
 
 
     std::mutex nav_highfreq_mutex_;

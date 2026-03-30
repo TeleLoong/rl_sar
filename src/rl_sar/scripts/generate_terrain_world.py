@@ -605,7 +605,7 @@ def main() -> int:
     ap.add_argument("--out", type=str, default="/tmp/rl_sar_generated.world")
     ap.add_argument("--size", type=float, default=12.0)
     ap.add_argument("--wall-thickness", type=float, default=0.3)
-    ap.add_argument("--wall-height", type=float, default=0.5)
+    ap.add_argument("--wall-height", type=float, default=2.0)
     ap.add_argument("--cell-size", type=float, default=None)
     ap.add_argument("--spawn-keepout", type=float, default=1.2)
     ap.add_argument("--spawn-box", type=float, default=1.0)
