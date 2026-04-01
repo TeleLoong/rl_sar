@@ -8,6 +8,7 @@ go2/navi:
   vision_channels: 2
   nav_dt: 0.1
   nav_episode_length_s: 30.0
+  goal_stop_radius: 0.5
   clip_commands: 3.0
   momentum_factor: 0.95
   num_observations: 45

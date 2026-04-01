@@ -1,10 +1,10 @@
 # rl_sar
 
-迷宫：ros2 launch rl_sar gazebo.launch.py rname:=go2 terrain:=maze seed:=1 difficulty:=0.8 start_corner:=bl  
+迷宫：ros2 launch rl_sar gazebo.launch.py rname:=lite3 terrain:=maze seed:=1 difficulty:=0.8 start_corner:=bl  
 
-避障：ros2 launch rl_sar gazebo.launch.py rname:=go2 terrain:=navigation seed:=2 difficulty:=0.5 start_corner:=bl
+避障：ros2 launch rl_sar gazebo.launch.py rname:=lite3 terrain:=navigation seed:=2 difficulty:=0.5 start_corner:=bl
 
-
+replay: ./replay_localize_and_record_rviz.sh   /home/teleai/Desktop/liangwang_ws/rl_sar_new/bag/3_25/run_20260331_122023   /home/teleai/Desktop/liangwang_ws/rl_sar_new/bag/3_25/map/lite3.yaml   /home/teleai/Desktop/liangwang_ws/rl_sar_new/bag/3_25/map/lite3.pcd
 
 
 [![Ubuntu 20.04/22.04](https://img.shields.io/badge/Ubuntu-20.04/22.04-blue.svg?logo=ubuntu)](https://ubuntu.com/)

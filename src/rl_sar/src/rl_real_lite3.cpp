@@ -352,6 +352,21 @@ void RL_Real::RobotControl()
     {
         this->control.navigation_mode = !this->control.navigation_mode;
         this->nav_enabled_.store(this->control.navigation_mode);
+        if (!this->control.navigation_mode)
+        {
+            // Prevent stale velocity commands when navigation is turned off.
+            this->nav_enable_request_.store(false);
+            this->nav_cmd_x_.store(0.0);
+            this->nav_cmd_y_.store(0.0);
+            this->nav_cmd_yaw_.store(0.0);
+            this->control.x = 0.0;
+            this->control.y = 0.0;
+            this->control.yaw = 0.0;
+            if (this->nav_high_command_.defined())
+            {
+                this->nav_high_command_.zero_();
+            }
+        }
         std::cout << std::endl << LOGGER::INFO << "Navigation mode: " << (this->control.navigation_mode ? "ON" : "OFF") << std::endl;
         this->control.current_keyboard = this->control.last_keyboard;
     }
@@ -688,6 +703,9 @@ void RL_Real::UpdateHighFrequencyObs()
 void RL_Real::DisableNavigationWithError(const std::string &stage, const std::string &detail)
 {
     this->control.navigation_mode = false;
+    this->control.x = 0.0;
+    this->control.y = 0.0;
+    this->control.yaw = 0.0;
     this->nav_enabled_.store(false);
     this->nav_enable_request_.store(false);
     this->nav_cmd_x_.store(0.0);

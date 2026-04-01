@@ -205,6 +205,7 @@ public:
     int nav_vision_channels_ = 2;      // expected channels for nav_vision_model input
     double nav_dt_ = 0.1;               // 10Hz
     double nav_episode_length_s_ = 30;  // default if not specified
+    double nav_goal_stop_radius_ = 0.5; // stop nav when sqrt(pred_x^2 + pred_y^2) <= radius
     // Training-aligned command shaping:
     // source -> LPF(alpha) -> step limit -> clip
     double nav_command_clip_x_ = 1.0;
@@ -235,6 +236,8 @@ public:
 
     std::mutex nav_last_actions_mutex_;
     std::vector<float> nav_last_actions_;
+    std::mutex nav_latest_depth_mutex_;
+    sensor_msgs::msg::Image::SharedPtr nav_latest_depth_msg_;
 };
 
 #endif // RL_SIM_HPP

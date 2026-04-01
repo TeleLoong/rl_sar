@@ -358,16 +358,8 @@ RL_Sim::RL_Sim()
 }
 void RL_Sim::DepthImageCallback(const sensor_msgs::msg::Image::SharedPtr msg)
 {
-    // Isaac Gym nav rollout uses depth at 10Hz. Camera is configured at 60Hz in lite3 xacro,
-    // so downsample by 6 to keep temporal spacing aligned.
-    constexpr int kDepthSubsample = 6;
-    if ((this->motion_time % kDepthSubsample) == 0) {
-        torch::Tensor processed_depth = depth_buffer.process_depth_image(msg,
-            this->processed_depth_publisher);
-        // processed_depth shape: [30, 43], insert函数会处理batch维度
-        depth_buffer.insert(processed_depth);
-    }
-    ++this->motion_time;
+    std::lock_guard<std::mutex> lock(this->nav_latest_depth_mutex_);
+    this->nav_latest_depth_msg_ = msg;
 }
 RL_Sim::~RL_Sim()
 {
@@ -634,6 +626,20 @@ void RL_Sim::RobotControl()
         {
             this->control.navigation_mode = !this->control.navigation_mode;
             this->nav_enabled_.store(this->control.navigation_mode);
+            if (!this->control.navigation_mode)
+            {
+                // Prevent stale velocity commands when navigation is turned off.
+                this->nav_cmd_x_.store(0.0);
+                this->nav_cmd_y_.store(0.0);
+                this->nav_cmd_yaw_.store(0.0);
+                this->control.x = 0.0;
+                this->control.y = 0.0;
+                this->control.yaw = 0.0;
+                if (this->nav_high_command_.defined())
+                {
+                    this->nav_high_command_.zero_();
+                }
+            }
             std::cout << std::endl << LOGGER::INFO << "Navigation mode: " << (this->control.navigation_mode ? "ON" : "OFF") << std::endl;
             this->control.current_keyboard = this->control.last_keyboard;
         }
@@ -1150,6 +1156,11 @@ bool RL_Sim::InitHierarchicalNav()
     {
         this->nav_vision_channels_ = 1;
     }
+    if (config["goal_stop_radius"])
+    {
+        this->nav_goal_stop_radius_ = config["goal_stop_radius"].as<double>();
+    }
+    this->nav_goal_stop_radius_ = std::max(0.0, this->nav_goal_stop_radius_);
 
     // Keep one extra newest frame in buffer and drop it at inference time for one-frame delay.
     depth_buffer = DepthBuffer(1, 30, 43, this->nav_vision_channels_ + 1);
@@ -1165,6 +1176,7 @@ bool RL_Sim::InitHierarchicalNav()
               << this->nav_high_command_max_step_x_ << ", "
               << this->nav_high_command_max_step_y_ << ", "
               << this->nav_high_command_max_step_yaw_ << "]"
+              << ", goal_stop_radius=" << this->nav_goal_stop_radius_
               << std::endl;
 
     this->nav_timer_left_.store(this->nav_episode_length_s_);
@@ -1449,6 +1461,18 @@ void RL_Sim::UpdateHighFrequencyObs()
         hf_hist = this->nav_highfreq_buf_.get_obs_vec(obs_ids_20);
     }
 
+    sensor_msgs::msg::Image::SharedPtr latest_depth_msg;
+    {
+        std::lock_guard<std::mutex> lock(this->nav_latest_depth_mutex_);
+        latest_depth_msg = this->nav_latest_depth_msg_;
+    }
+    if (latest_depth_msg)
+    {
+        torch::Tensor processed_depth = depth_buffer.process_depth_image(
+            latest_depth_msg, this->processed_depth_publisher);
+        depth_buffer.insert(processed_depth);
+    }
+
     torch::Tensor vision_feat;
     try
     {
@@ -1643,11 +1667,13 @@ void RL_Sim::UpdateHighFrequencyObs()
 	        const double tx = pred_target_body[0][0].item<double>();
 	        const double ty = pred_target_body[0][1].item<double>();
 	        const double tyaw = (pred_target_body.numel() >= 3) ? pred_target_body[0][2].item<double>() : 0.0;
+            const double goal_pred_radius = std::hypot(tx, ty);
 
 	        if (dbg_tick == 0 || new_goal)
 	        {
 	            std::cout << LOGGER::INFO
-	                      << " NavPred body(robot_model):[" << tx << ", " << ty << ", " << tyaw << "]";
+	                      << " NavPred body(robot_model):[" << tx << ", " << ty << ", " << tyaw << "]"
+                          << " r=" << goal_pred_radius;
 	            if (goal_body_live_ok)
 	            {
 	                std::cout << " goal_body_live:[" << goal_body_live_x << ", " << goal_body_live_y << ", " << goal_body_live_yaw << "]";
@@ -1659,9 +1685,28 @@ void RL_Sim::UpdateHighFrequencyObs()
 	            std::cout << std::endl;
 	        }
 
-        // Update markers at the same rate as high-level inference (typically 10Hz).
-        this->UpdateNavPredMarker(tx, ty, tyaw);
-    }
+	        // Update markers at the same rate as high-level inference (typically 10Hz).
+	        this->UpdateNavPredMarker(tx, ty, tyaw);
+
+            if (goal_pred_radius <= this->nav_goal_stop_radius_)
+            {
+                this->nav_enabled_.store(false);
+                this->control.navigation_mode = false;
+                this->nav_cmd_x_.store(0.0);
+                this->nav_cmd_y_.store(0.0);
+                this->nav_cmd_yaw_.store(0.0);
+                this->control.x = 0.0;
+                this->control.y = 0.0;
+                this->control.yaw = 0.0;
+                this->nav_high_command_.zero_();
+                std::cout << LOGGER::INFO
+                          << "Navigation mode: OFF (goal reached, r="
+                          << goal_pred_radius << " <= " << this->nav_goal_stop_radius_
+                          << ")"
+                          << std::endl;
+                return;
+            }
+	    }
 
 	    this->nav_cmd_x_.store(cmd[0][0].item<double>());
 	    this->nav_cmd_y_.store(cmd[0][1].item<double>());
