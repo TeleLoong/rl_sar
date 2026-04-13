@@ -1211,9 +1211,9 @@ bool RL_Sim::InitHierarchicalNav()
 
     // training-aligned dims (go2)
     const int dof = this->params.num_of_dofs; // 12
-    const int hf_dim = 1 + 3 + 3 + dof + dof + dof -12;
-    const int obs_dim = 3 + 3 + 3 + 1 + 3 + 3 + dof + dof + dof - 15;
-    const int obs_io_dim = 3 + 3 + 3 + 1 + 3 + 3 + dof + dof + dof - 15;
+    const int hf_dim = 1 + 3 + 3 + dof + dof + dof ;
+    const int obs_dim = 3 + 3 + 3 + 1 + 3 + 3 + dof + dof + dof ;
+    const int obs_io_dim = 3 + 3 + 3 + 1 + 3 + 3 + dof + dof + dof ;
 
     this->nav_highfreq_buf_ = ObservationBuffer(1, {hf_dim}, this->nav_highfreq_hist_len_, "time");
     this->nav_obs_hist_buf_ = ObservationBuffer(1, {obs_dim}, this->nav_obs_hist_len_, "time");
@@ -1271,7 +1271,7 @@ void RL_Sim::UpdateHighFrequencyObs()
         }
     }
 
-    torch::Tensor hf = torch::cat({time_io, base_ang_vel, projected_gravity, dof_pos_term, dof_vel_term}, 1);
+    torch::Tensor hf = torch::cat({time_io, base_ang_vel, projected_gravity, dof_pos_term, dof_vel_term, actions}, 1);
     {
         std::lock_guard<std::mutex> lock(this->nav_highfreq_mutex_);
         this->nav_highfreq_buf_.insert(hf);
@@ -1406,25 +1406,25 @@ void RL_Sim::UpdateHighFrequencyObs()
     torch::Tensor obs_frame = torch::cat({
         this->nav_position_targets_body_initial_.to(torch::kFloat32),
         this->nav_spawn_positions_body_initial_.to(torch::kFloat32),
-        // high_command_scaled,
+        high_command_scaled,
         timer_tensor,
         base_ang_vel,
         projected_gravity,
         dof_pos_term,
         dof_vel_term,
-        // actions,
+        actions,
     }, 1);
 
     torch::Tensor obs_io_frame = torch::cat({
         this->nav_position_targets_body_initial_.to(torch::kFloat32),
         this->nav_spawn_positions_body_initial_.to(torch::kFloat32),
         time_io_tensor,
-        // high_command_scaled,
+        high_command_scaled,
         base_ang_vel,
         projected_gravity,
         dof_pos_term,
         dof_vel_term,
-        // actions,
+        actions,
     }, 1);
 
     torch::Tensor obs_io_frame_hf = torch::cat({
@@ -1433,7 +1433,7 @@ void RL_Sim::UpdateHighFrequencyObs()
         projected_gravity,
         dof_pos_term,
         dof_vel_term,
-        // actions,
+        actions,
     }, 1);
 
     if (new_goal)
