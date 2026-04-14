@@ -1418,8 +1418,8 @@ void RL_Sim::UpdateHighFrequencyObs()
     torch::Tensor obs_io_frame = torch::cat({
         this->nav_position_targets_body_initial_.to(torch::kFloat32),
         this->nav_spawn_positions_body_initial_.to(torch::kFloat32),
-        time_io_tensor,
         high_command_scaled,
+        time_io_tensor,
         base_ang_vel,
         projected_gravity,
         dof_pos_term,
