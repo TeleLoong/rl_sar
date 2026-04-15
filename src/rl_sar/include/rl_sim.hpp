@@ -165,6 +165,24 @@ public:
     void RunHighLevel();
     bool InitHierarchicalNav();
     void UpdateHighFrequencyObs();
+    void StartNavObsLogIfNeeded(uint64_t goal_seq);
+    void StopNavObsLogIfNeeded();
+    void WriteNavObsSemanticLog(
+        uint64_t goal_seq,
+        bool new_goal,
+        double time_io,
+        double timer_norm,
+        const torch::Tensor &pred_target_body,
+        const torch::Tensor &cmd_raw,
+        const torch::Tensor &cmd_filtered,
+        const torch::Tensor &prev_high_cmd_scaled,
+        const torch::Tensor &base_ang_vel_scaled,
+        const torch::Tensor &projected_gravity,
+        const torch::Tensor &dof_pos_raw,
+        const torch::Tensor &dof_pos_term,
+        const torch::Tensor &dof_vel_raw,
+        const torch::Tensor &dof_vel_term,
+        const torch::Tensor &actions);
 
     // nav state shared across loops
     std::atomic<bool> nav_enabled_{false};
@@ -215,6 +233,14 @@ public:
     double nav_high_command_max_step_x_ = 0.1;
     double nav_high_command_max_step_y_ = 0.05;
     double nav_high_command_max_step_yaw_ = 0.12;
+    bool nav_obs_log_enable_ = true;
+    double nav_obs_log_interval_s_ = 0.1;
+    std::string nav_obs_log_dir_;
+    bool nav_obs_log_active_ = false;
+    uint64_t nav_obs_log_goal_seq_ = 0;
+    double nav_obs_log_last_time_io_ = -1.0;
+    std::string nav_obs_log_path_;
+    std::ofstream nav_obs_log_stream_;
 
 
     std::mutex nav_highfreq_mutex_;

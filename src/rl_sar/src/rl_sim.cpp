@@ -5,6 +5,11 @@
 
 #include "rl_sim.hpp"
 
+#include <chrono>
+#include <iomanip>
+#include <limits>
+#include <sstream>
+
 #if defined(USE_ROS2)
 static geometry_msgs::msg::Quaternion YawToQuaternion(double yaw)
 {
@@ -30,6 +35,26 @@ static double WrapToPi(double a)
     while (a > M_PI) a -= 2.0 * M_PI;
     while (a < -M_PI) a += 2.0 * M_PI;
     return a;
+}
+
+static void QuaternionToRpyDeg(double w, double x, double y, double z,
+                               double &roll_deg, double &pitch_deg, double &yaw_deg)
+{
+    const double sinr_cosp = 2.0 * (w * x + y * z);
+    const double cosr_cosp = 1.0 - 2.0 * (x * x + y * y);
+    const double roll = std::atan2(sinr_cosp, cosr_cosp);
+
+    const double sinp = 2.0 * (w * y - z * x);
+    const double pitch = (std::abs(sinp) >= 1.0) ? std::copysign(M_PI / 2.0, sinp) : std::asin(sinp);
+
+    const double siny_cosp = 2.0 * (w * z + x * y);
+    const double cosy_cosp = 1.0 - 2.0 * (y * y + z * z);
+    const double yaw = std::atan2(siny_cosp, cosy_cosp);
+
+    constexpr double kRad2Deg = 180.0 / M_PI;
+    roll_deg = roll * kRad2Deg;
+    pitch_deg = pitch * kRad2Deg;
+    yaw_deg = yaw * kRad2Deg;
 }
 
 static void RotateVecByQuat(double qx, double qy, double qz, double qw, double vx, double vy, double vz,
@@ -363,6 +388,7 @@ void RL_Sim::DepthImageCallback(const sensor_msgs::msg::Image::SharedPtr msg)
 }
 RL_Sim::~RL_Sim()
 {
+    this->StopNavObsLogIfNeeded();
     this->loop_keyboard->shutdown();
     this->loop_control->shutdown();
     this->loop_rl->shutdown();
@@ -628,6 +654,7 @@ void RL_Sim::RobotControl()
             this->nav_enabled_.store(this->control.navigation_mode);
             if (!this->control.navigation_mode)
             {
+                this->StopNavObsLogIfNeeded();
                 // Prevent stale velocity commands when navigation is turned off.
                 this->nav_cmd_x_.store(0.0);
                 this->nav_cmd_y_.store(0.0);
@@ -1161,6 +1188,19 @@ bool RL_Sim::InitHierarchicalNav()
         this->nav_goal_stop_radius_ = config["goal_stop_radius"].as<double>();
     }
     this->nav_goal_stop_radius_ = std::max(0.0, this->nav_goal_stop_radius_);
+    if (config["obs_log_enable"])
+    {
+        this->nav_obs_log_enable_ = config["obs_log_enable"].as<bool>();
+    }
+    if (config["obs_log_interval_s"])
+    {
+        const double interval_s = config["obs_log_interval_s"].as<double>();
+        this->nav_obs_log_interval_s_ = (interval_s > 0.0) ? interval_s : 0.1;
+    }
+    if (config["obs_log_dir"])
+    {
+        this->nav_obs_log_dir_ = config["obs_log_dir"].as<std::string>();
+    }
 
     // Keep one extra newest frame in buffer and drop it at inference time for one-frame delay.
     depth_buffer = DepthBuffer(1, 30, 43, this->nav_vision_channels_ + 1);
@@ -1177,6 +1217,9 @@ bool RL_Sim::InitHierarchicalNav()
               << this->nav_high_command_max_step_y_ << ", "
               << this->nav_high_command_max_step_yaw_ << "]"
               << ", goal_stop_radius=" << this->nav_goal_stop_radius_
+              << ", obs_log_enable=" << (this->nav_obs_log_enable_ ? "true" : "false")
+              << ", obs_log_interval_s=" << this->nav_obs_log_interval_s_
+              << ", obs_log_dir=" << (this->nav_obs_log_dir_.empty() ? "(default)" : this->nav_obs_log_dir_)
               << std::endl;
 
     this->nav_timer_left_.store(this->nav_episode_length_s_);
@@ -1226,6 +1269,269 @@ bool RL_Sim::InitHierarchicalNav()
 
     this->nav_models_loaded_.store(true);
     return true;
+}
+
+void RL_Sim::StartNavObsLogIfNeeded(uint64_t goal_seq)
+{
+    if (!this->nav_obs_log_enable_)
+    {
+        return;
+    }
+    if (this->nav_obs_log_active_ && this->nav_obs_log_goal_seq_ == goal_seq && this->nav_obs_log_stream_.is_open())
+    {
+        return;
+    }
+    this->StopNavObsLogIfNeeded();
+
+    std::string log_dir = this->nav_obs_log_dir_;
+    if (log_dir.empty())
+    {
+        log_dir = std::string(CMAKE_CURRENT_SOURCE_DIR) + "/logs/nav_obs_sim";
+    }
+    std::error_code ec;
+    std::filesystem::create_directories(log_dir, ec);
+    if (ec)
+    {
+        log_dir = "/tmp/rl_sar_nav_obs_sim";
+        ec.clear();
+        std::filesystem::create_directories(log_dir, ec);
+    }
+
+    const auto now = std::chrono::system_clock::now();
+    const auto ts = std::chrono::duration_cast<std::chrono::seconds>(now.time_since_epoch()).count();
+    std::ostringstream file_oss;
+    file_oss << log_dir << "/nav_obs_goal_" << goal_seq << "_" << ts << ".csv";
+
+    this->nav_obs_log_path_ = file_oss.str();
+    this->nav_obs_log_stream_.open(this->nav_obs_log_path_, std::ios::out | std::ios::trunc);
+    if (!this->nav_obs_log_stream_.is_open())
+    {
+        std::cout << LOGGER::WARNING << "[NAV][OBSLOG] failed to open: " << this->nav_obs_log_path_ << std::endl;
+        this->nav_obs_log_path_.clear();
+        return;
+    }
+
+    std::ostringstream header;
+    header << "goal_seq,new_goal,time_io,timer_norm,"
+           << "goal_init_x,goal_init_y,goal_init_yaw,"
+           << "pred_body_x,pred_body_y,pred_body_yaw,"
+           << "cmd_raw_x,cmd_raw_y,cmd_raw_yaw,"
+           << "cmd_filtered_x,cmd_filtered_y,cmd_filtered_yaw,"
+           << "prev_high_cmd_scaled_x,prev_high_cmd_scaled_y,prev_high_cmd_scaled_yaw,"
+           << "imu_rpy_deg_roll,imu_rpy_deg_pitch,imu_rpy_deg_yaw,"
+           << "imu_raw_rate_roll,imu_raw_rate_pitch,imu_raw_rate_yaw,"
+           << "imu_gyro_body_x,imu_gyro_body_y,imu_gyro_body_z,"
+           << "ang_vel_scaled_x,ang_vel_scaled_y,ang_vel_scaled_z,"
+           << "proj_g_x,proj_g_y,proj_g_z,";
+    for (int i = 0; i < this->params.num_of_dofs; ++i)
+    {
+        header << "dof_pos_raw_" << i << ",";
+    }
+    for (int i = 0; i < this->params.num_of_dofs; ++i)
+    {
+        header << "dof_pos_term_" << i << ",";
+    }
+    for (int i = 0; i < this->params.num_of_dofs; ++i)
+    {
+        header << "dof_vel_raw_" << i << ",";
+    }
+    for (int i = 0; i < this->params.num_of_dofs; ++i)
+    {
+        header << "dof_vel_term_" << i << ",";
+    }
+    for (int i = 0; i < this->params.num_of_dofs; ++i)
+    {
+        header << "actions_" << i;
+        if (i + 1 < this->params.num_of_dofs)
+        {
+            header << ",";
+        }
+    }
+    this->nav_obs_log_stream_ << header.str() << "\n";
+    this->nav_obs_log_stream_.flush();
+
+    this->nav_obs_log_goal_seq_ = goal_seq;
+    this->nav_obs_log_last_time_io_ = -1.0;
+    this->nav_obs_log_active_ = true;
+
+    std::cout << LOGGER::INFO
+              << "[NAV][OBSLOG] started goal_seq=" << goal_seq
+              << " path=" << this->nav_obs_log_path_
+              << " interval_s=" << this->nav_obs_log_interval_s_
+              << std::endl;
+}
+
+void RL_Sim::StopNavObsLogIfNeeded()
+{
+    if (this->nav_obs_log_stream_.is_open())
+    {
+        this->nav_obs_log_stream_.flush();
+        this->nav_obs_log_stream_.close();
+    }
+    if (this->nav_obs_log_active_)
+    {
+        std::cout << LOGGER::INFO
+                  << "[NAV][OBSLOG] stopped goal_seq=" << this->nav_obs_log_goal_seq_
+                  << " path=" << this->nav_obs_log_path_
+                  << std::endl;
+    }
+    this->nav_obs_log_active_ = false;
+    this->nav_obs_log_goal_seq_ = 0;
+    this->nav_obs_log_last_time_io_ = -1.0;
+    this->nav_obs_log_path_.clear();
+}
+
+void RL_Sim::WriteNavObsSemanticLog(
+    uint64_t goal_seq,
+    bool new_goal,
+    double time_io,
+    double timer_norm,
+    const torch::Tensor &pred_target_body,
+    const torch::Tensor &cmd_raw,
+    const torch::Tensor &cmd_filtered,
+    const torch::Tensor &prev_high_cmd_scaled,
+    const torch::Tensor &base_ang_vel_scaled,
+    const torch::Tensor &projected_gravity,
+    const torch::Tensor &dof_pos_raw,
+    const torch::Tensor &dof_pos_term,
+    const torch::Tensor &dof_vel_raw,
+    const torch::Tensor &dof_vel_term,
+    const torch::Tensor &actions)
+{
+    if (!this->nav_obs_log_enable_ || !this->nav_obs_log_active_ || !this->nav_obs_log_stream_.is_open())
+    {
+        return;
+    }
+    if (this->nav_obs_log_goal_seq_ != goal_seq)
+    {
+        return;
+    }
+    if (!new_goal && this->nav_obs_log_interval_s_ > 0.0 && this->nav_obs_log_last_time_io_ >= 0.0)
+    {
+        if ((time_io - this->nav_obs_log_last_time_io_) < this->nav_obs_log_interval_s_)
+        {
+            return;
+        }
+    }
+    this->nav_obs_log_last_time_io_ = time_io;
+
+    const auto flat_cpu = [](const torch::Tensor &t) -> torch::Tensor {
+        if (!t.defined() || t.numel() <= 0)
+        {
+            return torch::Tensor();
+        }
+        return t.detach().to(torch::kCPU).to(torch::kFloat32).view({-1});
+    };
+    const auto value_at = [](const torch::Tensor &flat, int64_t idx) -> double {
+        if (!flat.defined() || idx < 0 || idx >= flat.numel())
+        {
+            return std::numeric_limits<double>::quiet_NaN();
+        }
+        return static_cast<double>(flat[idx].item<float>());
+    };
+
+    const torch::Tensor pred_flat = flat_cpu(pred_target_body);
+    const torch::Tensor cmd_raw_flat = flat_cpu(cmd_raw);
+    const torch::Tensor cmd_filtered_flat = flat_cpu(cmd_filtered);
+    const torch::Tensor prev_cmd_scaled_flat = flat_cpu(prev_high_cmd_scaled);
+    const torch::Tensor ang_vel_scaled_flat = flat_cpu(base_ang_vel_scaled);
+    const torch::Tensor proj_g_flat = flat_cpu(projected_gravity);
+    const torch::Tensor dof_pos_raw_flat = flat_cpu(dof_pos_raw);
+    const torch::Tensor dof_pos_term_flat = flat_cpu(dof_pos_term);
+    const torch::Tensor dof_vel_raw_flat = flat_cpu(dof_vel_raw);
+    const torch::Tensor dof_vel_term_flat = flat_cpu(dof_vel_term);
+    const torch::Tensor actions_flat = flat_cpu(actions);
+
+    double q_w = 1.0;
+    double q_x = 0.0;
+    double q_y = 0.0;
+    double q_z = 0.0;
+    double imu_gyro_x = 0.0;
+    double imu_gyro_y = 0.0;
+    double imu_gyro_z = 0.0;
+    {
+        std::lock_guard<std::mutex> lock(this->nav_state_mutex_);
+        q_w = this->robot_state.imu.quaternion[0];
+        q_x = this->robot_state.imu.quaternion[1];
+        q_y = this->robot_state.imu.quaternion[2];
+        q_z = this->robot_state.imu.quaternion[3];
+        imu_gyro_x = this->robot_state.imu.gyroscope[0];
+        imu_gyro_y = this->robot_state.imu.gyroscope[1];
+        imu_gyro_z = this->robot_state.imu.gyroscope[2];
+    }
+    double rpy_roll_deg = 0.0;
+    double rpy_pitch_deg = 0.0;
+    double rpy_yaw_deg = 0.0;
+    QuaternionToRpyDeg(q_w, q_x, q_y, q_z, rpy_roll_deg, rpy_pitch_deg, rpy_yaw_deg);
+    constexpr double kRad2Deg = 180.0 / M_PI;
+    const double imu_raw_rate_roll = imu_gyro_x * kRad2Deg;
+    const double imu_raw_rate_pitch = imu_gyro_y * kRad2Deg;
+    const double imu_raw_rate_yaw = imu_gyro_z * kRad2Deg;
+
+    std::ostringstream row;
+    row << std::fixed << std::setprecision(6)
+        << goal_seq << ","
+        << (new_goal ? 1 : 0) << ","
+        << time_io << ","
+        << timer_norm << ","
+        << this->nav_position_targets_body_initial_[0][0].item<double>() << ","
+        << this->nav_position_targets_body_initial_[0][1].item<double>() << ","
+        << this->nav_position_targets_body_initial_[0][2].item<double>() << ","
+        << value_at(pred_flat, 0) << ","
+        << value_at(pred_flat, 1) << ","
+        << value_at(pred_flat, 2) << ","
+        << value_at(cmd_raw_flat, 0) << ","
+        << value_at(cmd_raw_flat, 1) << ","
+        << value_at(cmd_raw_flat, 2) << ","
+        << value_at(cmd_filtered_flat, 0) << ","
+        << value_at(cmd_filtered_flat, 1) << ","
+        << value_at(cmd_filtered_flat, 2) << ","
+        << value_at(prev_cmd_scaled_flat, 0) << ","
+        << value_at(prev_cmd_scaled_flat, 1) << ","
+        << value_at(prev_cmd_scaled_flat, 2) << ","
+        << rpy_roll_deg << ","
+        << rpy_pitch_deg << ","
+        << rpy_yaw_deg << ","
+        << imu_raw_rate_roll << ","
+        << imu_raw_rate_pitch << ","
+        << imu_raw_rate_yaw << ","
+        << imu_gyro_x << ","
+        << imu_gyro_y << ","
+        << imu_gyro_z << ","
+        << value_at(ang_vel_scaled_flat, 0) << ","
+        << value_at(ang_vel_scaled_flat, 1) << ","
+        << value_at(ang_vel_scaled_flat, 2) << ","
+        << value_at(proj_g_flat, 0) << ","
+        << value_at(proj_g_flat, 1) << ","
+        << value_at(proj_g_flat, 2) << ",";
+
+    for (int i = 0; i < this->params.num_of_dofs; ++i)
+    {
+        row << value_at(dof_pos_raw_flat, i) << ",";
+    }
+    for (int i = 0; i < this->params.num_of_dofs; ++i)
+    {
+        row << value_at(dof_pos_term_flat, i) << ",";
+    }
+    for (int i = 0; i < this->params.num_of_dofs; ++i)
+    {
+        row << value_at(dof_vel_raw_flat, i) << ",";
+    }
+    for (int i = 0; i < this->params.num_of_dofs; ++i)
+    {
+        row << value_at(dof_vel_term_flat, i) << ",";
+    }
+    for (int i = 0; i < this->params.num_of_dofs; ++i)
+    {
+        row << value_at(actions_flat, i);
+        if (i + 1 < this->params.num_of_dofs)
+        {
+            row << ",";
+        }
+    }
+
+    this->nav_obs_log_stream_ << row.str() << "\n";
+    this->nav_obs_log_stream_.flush();
 }
 
 void RL_Sim::UpdateHighFrequencyObs()
@@ -1282,15 +1588,18 @@ void RL_Sim::UpdateHighFrequencyObs()
 	{
     if (!this->nav_models_loaded_.load() || !this->nav_enabled_.load())
     {
+        this->StopNavObsLogIfNeeded();
         return;
     }
     if (!this->nav_has_goal_.load() || !this->rl_init_done)
     {
+        this->StopNavObsLogIfNeeded();
         return;
     }
 
     const uint64_t goal_seq = this->nav_goal_seq_.load();
     const bool new_goal = (goal_seq != this->nav_active_goal_seq_.load());
+    this->StartNavObsLogIfNeeded(goal_seq);
 
 	    const double goal_body_x_initial = this->nav_goal_body_x_.load();
 	    const double goal_body_y_initial = this->nav_goal_body_y_.load();
@@ -1367,7 +1676,7 @@ void RL_Sim::UpdateHighFrequencyObs()
     torch::Tensor time_io_tensor = torch::tensor({{static_cast<float>(time_io)}});
 
     const int dof = this->params.num_of_dofs;
-    torch::Tensor base_ang_vel, projected_gravity, dof_pos_term, dof_vel_term;
+    torch::Tensor base_ang_vel, projected_gravity, dof_pos_raw, dof_pos_term, dof_vel_raw, dof_vel_term;
     {
         std::lock_guard<std::mutex> lock(this->nav_state_mutex_);
         torch::Tensor base_quat = torch::tensor({{
@@ -1384,10 +1693,10 @@ void RL_Sim::UpdateHighFrequencyObs()
             static_cast<float>(this->robot_state.imu.gyroscope[2]),
         }}) * static_cast<float>(this->params.ang_vel_scale);
 
-        torch::Tensor dof_pos = torch::tensor(this->robot_state.motor_state.q).narrow(0, 0, dof).unsqueeze(0).to(torch::kFloat32);
-        torch::Tensor dof_vel = torch::tensor(this->robot_state.motor_state.dq).narrow(0, 0, dof).unsqueeze(0).to(torch::kFloat32);
-        dof_pos_term = (dof_pos - this->params.default_dof_pos) * static_cast<float>(this->params.dof_pos_scale);
-        dof_vel_term = dof_vel * static_cast<float>(this->params.dof_vel_scale);
+        dof_pos_raw = torch::tensor(this->robot_state.motor_state.q).narrow(0, 0, dof).unsqueeze(0).to(torch::kFloat32);
+        dof_vel_raw = torch::tensor(this->robot_state.motor_state.dq).narrow(0, 0, dof).unsqueeze(0).to(torch::kFloat32);
+        dof_pos_term = (dof_pos_raw - this->params.default_dof_pos) * static_cast<float>(this->params.dof_pos_scale);
+        dof_vel_term = dof_vel_raw * static_cast<float>(this->params.dof_vel_scale);
     }
 
     torch::Tensor actions = torch::zeros({1, dof}, torch::dtype(torch::kFloat32));
@@ -1692,6 +2001,7 @@ void RL_Sim::UpdateHighFrequencyObs()
             {
                 this->nav_enabled_.store(false);
                 this->control.navigation_mode = false;
+                this->StopNavObsLogIfNeeded();
                 this->nav_cmd_x_.store(0.0);
                 this->nav_cmd_y_.store(0.0);
                 this->nav_cmd_yaw_.store(0.0);
@@ -1707,6 +2017,23 @@ void RL_Sim::UpdateHighFrequencyObs()
                 return;
             }
 	    }
+
+    this->WriteNavObsSemanticLog(
+        goal_seq,
+        new_goal,
+        time_io,
+        timer_norm,
+        pred_target_body,
+        cmd_raw,
+        cmd,
+        high_command_scaled,
+        base_ang_vel,
+        projected_gravity,
+        dof_pos_raw,
+        dof_pos_term,
+        dof_vel_raw,
+        dof_vel_term,
+        actions);
 
 	    this->nav_cmd_x_.store(cmd[0][0].item<double>());
 	    this->nav_cmd_y_.store(cmd[0][1].item<double>());
