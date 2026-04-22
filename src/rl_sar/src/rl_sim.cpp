@@ -37,6 +37,13 @@ static double WrapToPi(double a)
     return a;
 }
 
+static int64_t SteadyNowNs()
+{
+    return std::chrono::duration_cast<std::chrono::nanoseconds>(
+               std::chrono::steady_clock::now().time_since_epoch())
+        .count();
+}
+
 static void QuaternionToRpyDeg(double w, double x, double y, double z,
                                double &roll_deg, double &pitch_deg, double &yaw_deg)
 {
@@ -1223,8 +1230,7 @@ bool RL_Sim::InitHierarchicalNav()
               << std::endl;
 
     this->nav_timer_left_.store(this->nav_episode_length_s_);
-    this->nav_time_io_.store(0.0);
-    this->nav_time_io_hf_.store(0.0);
+    this->ResetNavSharedClock();
 
     this->nav_high_model_path_ = nav_dir + "/" + high_name;
     this->nav_vision_model_path_ = nav_dir + "/" + vision_name;
@@ -1269,6 +1275,28 @@ bool RL_Sim::InitHierarchicalNav()
 
     this->nav_models_loaded_.store(true);
     return true;
+}
+
+void RL_Sim::ResetNavSharedClock()
+{
+    this->nav_episode_start_ns_.store(SteadyNowNs(), std::memory_order_relaxed);
+    this->nav_time_io_.store(0.0, std::memory_order_relaxed);
+}
+
+double RL_Sim::SampleNavSharedTimeIo()
+{
+    const int64_t now_ns = SteadyNowNs();
+    int64_t start_ns = this->nav_episode_start_ns_.load(std::memory_order_relaxed);
+    if (start_ns <= 0 || now_ns < start_ns)
+    {
+        this->nav_episode_start_ns_.store(now_ns, std::memory_order_relaxed);
+        this->nav_time_io_.store(0.0, std::memory_order_relaxed);
+        return 0.0;
+    }
+
+    const double time_io = static_cast<double>(now_ns - start_ns) * 1e-9;
+    this->nav_time_io_.store(time_io, std::memory_order_relaxed);
+    return time_io;
 }
 
 void RL_Sim::StartNavObsLogIfNeeded(uint64_t goal_seq)
@@ -1541,8 +1569,7 @@ void RL_Sim::UpdateHighFrequencyObs()
         return;
     }
 
-    const double t = this->nav_time_io_hf_.load() + this->params.dt;
-    this->nav_time_io_hf_.store(t);
+    const double t = this->SampleNavSharedTimeIo();
 
     const int dof = this->params.num_of_dofs;
     torch::Tensor time_io = torch::tensor({{static_cast<float>(t)}});
@@ -1609,8 +1636,7 @@ void RL_Sim::UpdateHighFrequencyObs()
 		    {
 		        this->nav_active_goal_seq_.store(goal_seq);
 		        this->nav_timer_left_.store(this->nav_episode_length_s_);
-			        this->nav_time_io_.store(0.0);
-			        this->nav_time_io_hf_.store(0.0);
+			        this->ResetNavSharedClock();
 		        this->nav_goal_world_valid_.store(false);
 	        this->nav_high_command_.zero_();
 	        this->nav_cmd_x_.store(0.0);
@@ -1670,7 +1696,7 @@ void RL_Sim::UpdateHighFrequencyObs()
 
 		    const double timer_left = this->nav_timer_left_.load();
 		    const double timer_norm = std::max(0.0, timer_left) / std::max(1e-6, this->nav_episode_length_s_);
-			    const double time_io = this->nav_time_io_.load();
+			    const double time_io = this->SampleNavSharedTimeIo();
 
     torch::Tensor timer_tensor = torch::tensor({{static_cast<float>(timer_norm)}});
     torch::Tensor time_io_tensor = torch::tensor({{static_cast<float>(time_io)}});
@@ -2041,7 +2067,6 @@ void RL_Sim::UpdateHighFrequencyObs()
 	    this->nav_high_command_ = cmd.to(torch::kFloat32);
 
 		    this->nav_timer_left_.store(timer_left - this->nav_dt_);
-		    this->nav_time_io_.store(time_io + this->nav_dt_);
 }
 
 void RL_Sim::Plot()

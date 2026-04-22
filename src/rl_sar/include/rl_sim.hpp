@@ -25,6 +25,7 @@
 #include <fstream>
 #include <stdexcept>
 #include <atomic>
+#include <cstdint>
 #include <mutex>
 
 #if defined(USE_ROS1)
@@ -183,6 +184,8 @@ public:
         const torch::Tensor &dof_vel_raw,
         const torch::Tensor &dof_vel_term,
         const torch::Tensor &actions);
+    void ResetNavSharedClock();
+    double SampleNavSharedTimeIo();
 
     // nav state shared across loops
     std::atomic<bool> nav_enabled_{false};
@@ -254,10 +257,10 @@ public:
     torch::Tensor nav_high_command_;
 
     std::atomic<uint64_t> nav_active_goal_seq_{0};
-    // Time since current nav episode start for high-level policy (10Hz, advanced by nav_dt_).
+    // Shared monotonic episode clock anchor (steady clock nanoseconds).
+    std::atomic<int64_t> nav_episode_start_ns_{0};
+    // Latest sampled time since current nav episode start.
     std::atomic<double> nav_time_io_{0.0};
-    // Time since current nav episode start for high-frequency buffer (advanced by params.dt).
-    std::atomic<double> nav_time_io_hf_{0.0};
     std::atomic<double> nav_timer_left_{0.0};
 
     std::mutex nav_last_actions_mutex_;
